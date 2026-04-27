@@ -155,7 +155,7 @@ export async function handleWhatsappOfficialInbound(params: {
   });
 
   const humanDelay = runtime.channel.reply.resolveHumanDelayConfig(cfg, route.agentId);
-  const { dispatcher, replyOptions, markDispatchIdle } =
+  const { dispatcher, replyOptions, markRunComplete, markDispatchIdle } =
     runtime.channel.reply.createReplyDispatcherWithTyping({
       ...prefixOptions,
       humanDelay,
@@ -164,33 +164,28 @@ export async function handleWhatsappOfficialInbound(params: {
           payload && typeof payload === "object" && "text" in payload
             ? String((payload as { text?: string }).text ?? "")
             : "";
-        console.log(`${PLUGIN_ID}: deliver called to=${target} textLen=${replyText.length} empty=${!replyText.trim()}`);
         if (!replyText.trim()) return;
-        try {
-          await sendOutboundText({
-            cfg,
-            accountId: account.accountId,
-            to: target,
-            text: replyText,
-          });
-          console.log(`${PLUGIN_ID}: deliver sent to=${target}`);
-        } catch (err) {
-          console.error(`${PLUGIN_ID}: deliver sendOutboundText failed to=${target}: ${String(err)}`);
-          throw err;
-        }
+        await sendOutboundText({
+          cfg,
+          accountId: account.accountId,
+          to: target,
+          text: replyText,
+        });
       },
       onError: (err: unknown) => {
         console.error(`${PLUGIN_ID}: reply dispatcher error: ${String(err)}`);
       },
     });
 
-  console.log(`${PLUGIN_ID}: dispatchReplyFromConfig start from=${from}`);
-  await runtime.channel.reply.dispatchReplyFromConfig({
-    ctx: ctxPayload,
-    cfg,
-    dispatcher,
-    replyOptions: { ...replyOptions, onModelSelected },
-  });
-  console.log(`${PLUGIN_ID}: dispatchReplyFromConfig done from=${from}`);
-  markDispatchIdle();
+  try {
+    await runtime.channel.reply.dispatchReplyFromConfig({
+      ctx: ctxPayload,
+      cfg,
+      dispatcher,
+      replyOptions: { ...replyOptions, onModelSelected },
+    });
+  } finally {
+    markRunComplete();
+    markDispatchIdle();
+  }
 }
