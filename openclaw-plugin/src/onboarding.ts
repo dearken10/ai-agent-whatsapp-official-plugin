@@ -1,5 +1,5 @@
 import QRCode from "qrcode";
-import type { ChannelOnboardingAdapter, OpenClawConfig } from "openclaw/plugin-sdk";
+import type { ChannelSetupWizardAdapter, OpenClawConfig } from "openclaw/plugin-sdk";
 import { CHANNEL_CONFIG_KEY } from "./constants.js";
 import { requestPairingCode, resolveAccountFromCfg } from "./transport.js";
 
@@ -17,7 +17,7 @@ async function renderQr(url: string): Promise<string> {
   return `${whiteBackground}\n${link}`;
 }
 
-export const whatsappOfficialOnboardingAdapter: ChannelOnboardingAdapter = {
+export const whatsappOfficialOnboardingAdapter: ChannelSetupWizardAdapter = {
   channel: CHANNEL_CONFIG_KEY,
 
   getStatus: async ({ cfg }) => {

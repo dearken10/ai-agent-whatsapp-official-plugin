@@ -42,7 +42,7 @@ export const whatsappOfficialPlugin: ChannelPlugin<ResolvedWhatsappOfficialAccou
   capabilities: {
     chatTypes: ["direct"],
   },
-  onboarding: whatsappOfficialOnboardingAdapter,
+  setupWizard: whatsappOfficialOnboardingAdapter,
   reload: { configPrefixes: [`channels.${CHANNEL_CONFIG_KEY}`] },
   configSchema: {
     schema: {
