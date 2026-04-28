@@ -7,10 +7,9 @@ import (
 )
 
 type Config struct {
-	HTTPAddr           string
-	StoreDriver        string
-	PostgresDSN        string
-	StoreFilePath      string // path to JSON file when STORE_DRIVER=file
+	HTTPAddr      string
+	StoreDriver   string
+	StoreFilePath string // path to JSON file when STORE_DRIVER=file
 	SharedNumber       string
 	WebhookAppSecret   string
 	WebhookVerifyToken string
@@ -32,9 +31,8 @@ type Config struct {
 func Load() Config {
 	return Config{
 		HTTPAddr:           getenv("HTTP_ADDR", ":8080"),
-		StoreDriver:        getenv("STORE_DRIVER", "memory"),
-		PostgresDSN:        getenv("POSTGRES_DSN", "postgres://postgres:postgres@localhost:28032/whatsapp_plugin?sslmode=disable"),
-		StoreFilePath:      getenv("STORE_FILE_PATH", "./data/store.json"),
+		StoreDriver:   getenv("STORE_DRIVER", "memory"),
+		StoreFilePath: getenv("STORE_FILE_PATH", "./data/store.json"),
 		SharedNumber:       getenv("SHARED_WA_NUMBER", "+18885550100"),
 		WebhookAppSecret:   getenv("WEBHOOK_APP_SECRET", "dev-secret"),
 		WebhookVerifyToken: getenv("WEBHOOK_VERIFY_TOKEN", ""),

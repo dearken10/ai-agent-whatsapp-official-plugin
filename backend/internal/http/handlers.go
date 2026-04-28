@@ -38,8 +38,6 @@ func NewServer(cfg config.Config) (*Server, error) {
 		err error
 	)
 	switch strings.ToLower(cfg.StoreDriver) {
-	case "postgres":
-		st, err = store.NewPostgres(context.Background(), cfg.PostgresDSN)
 	case "sqlite":
 		st, err = store.NewSQLite(cfg.StoreFilePath)
 	case "file":

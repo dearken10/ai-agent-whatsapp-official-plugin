@@ -1,18 +1,4 @@
 services:
-  wa-postgres:
-    image: postgres:16-alpine
-    container_name: wa-postgres
-    environment:
-      POSTGRES_DB: whatsapp_plugin
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    volumes:
-      - wa-postgres-data:/var/lib/postgresql/data
-      - ./backend/migrations:/docker-entrypoint-initdb.d
-    ports:
-      # Host port avoids clashing with a local Postgres on 5432
-      - "28032:5432"
-
   wa-backend:
     build:
       context: .
@@ -21,9 +7,7 @@ services:
     environment:
       HTTP_ADDR: ":8080"
       ROUTING_BASE_URL: "${ROUTING_BASE_URL:-http://localhost:28080}"
-      STORE_DRIVER: "${STORE_DRIVER:-postgres}"
-      # Use Docker-internal hostname for container-to-container DB access.
-      POSTGRES_DSN: "postgres://postgres:postgres@wa-postgres:5432/whatsapp_plugin?sslmode=disable"
+      STORE_DRIVER: "${STORE_DRIVER:-memory}"
       SHARED_WA_NUMBER: "${SHARED_WA_NUMBER:-+18885550100}"
       WEBHOOK_APP_SECRET: "${WEBHOOK_APP_SECRET:-dev-secret}"
       WEBHOOK_VERIFY_TOKEN: "${WEBHOOK_VERIFY_TOKEN:-}"
@@ -34,11 +18,6 @@ services:
       WABA_PHONE_NUMBER_ID: "${WABA_PHONE_NUMBER_ID:-}"
       D360_API_KEY: "${D360_API_KEY:-}"
       D360_BASE_URL: "${D360_BASE_URL:-}"
-    depends_on:
-      - wa-postgres
     ports:
       # Host port avoids clashing with other services on 8080
       - "28080:8080"
-
-volumes:
-  wa-postgres-data:
