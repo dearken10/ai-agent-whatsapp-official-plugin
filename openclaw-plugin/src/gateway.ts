@@ -105,7 +105,7 @@ export async function startWhatsappOfficialGatewayAccount(
               return;
             }
             await handleWhatsappOfficialInbound({
-              channelLabel: "Official WhatsApp (imBee)",
+              channelLabel: "WhatsApp Official API by imBee",
               account,
               cfg: ctx.cfg as OpenClawConfig,
               from,

@@ -1,6 +1,6 @@
 {
   "id": "whatsapp-official",
-  "name": "Official WhatsApp API (imBee)",
+  "name": "WhatsApp Official API by imBee",
   "version": "0.1.16",
   "description": "Official WhatsApp Business API for your AI agent — no Meta verification, no server setup. Pair via QR in 2 minutes using imBee's verified shared number (free), or upgrade to a dedicated branded number for enterprise use.",
   "author": "imBee Limited",
@@ -50,7 +50,7 @@
   },
   "channelConfigs": {
     "whatsapp-official": {
-      "label": "Official WhatsApp API (imBee)",
+      "label": "WhatsApp Official API by imBee",
       "description": "Managed WhatsApp Cloud API channel via imBee routing (pairing + WebSocket inbound).",
       "schema": {
         "type": "object",

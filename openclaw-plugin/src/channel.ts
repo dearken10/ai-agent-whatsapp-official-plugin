@@ -32,8 +32,8 @@ export const whatsappOfficialPlugin: ChannelPlugin<ResolvedWhatsappOfficialAccou
   id: CHANNEL_CONFIG_KEY,
   meta: {
     id: CHANNEL_CONFIG_KEY,
-    label: "Official WhatsApp API (imBee)",
-    selectionLabel: "Official WhatsApp API (imBee)",
+    label: "WhatsApp Official API by imBee",
+    selectionLabel: "WhatsApp Official API by imBee",
     docsPath: `/channels/${CHANNEL_CONFIG_KEY}`,
     docsLabel: CHANNEL_CONFIG_KEY,
     blurb: "Managed WhatsApp Cloud API channel via imBee routing (pairing + WebSocket inbound).",

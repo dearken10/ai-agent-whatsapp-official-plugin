@@ -84,7 +84,7 @@ openclaw plugins install openclaw-channel-whatsapp-official
 openclaw channels add
 ```
 
-Then select **Official WhatsApp API (imBee)** from the channel list and follow the pairing wizard.
+Then select **WhatsApp Official API by imBee** from the channel list and follow the pairing wizard.
 
 ---
 

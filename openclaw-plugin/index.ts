@@ -5,7 +5,7 @@ import { setWhatsappOfficialRuntime } from "./src/runtime.js";
 
 export default {
   id: PLUGIN_ID,
-  name: "Official WhatsApp API (imBee)",
+  name: "WhatsApp Official API by imBee",
   description: "Connect OpenClaw to WhatsApp through the imBee managed Cloud API channel.",
   register(api: OpenClawPluginApi) {
     setWhatsappOfficialRuntime(api.runtime);
