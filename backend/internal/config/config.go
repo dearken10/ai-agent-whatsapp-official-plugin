@@ -31,7 +31,7 @@ type Config struct {
 func Load() Config {
 	return Config{
 		HTTPAddr:           getenv("HTTP_ADDR", ":8080"),
-		StoreDriver:   getenv("STORE_DRIVER", "memory"),
+		StoreDriver:   getenv("STORE_DRIVER", "sqlite"),
 		StoreFilePath: getenv("STORE_FILE_PATH", "./data/store.json"),
 		SharedNumber:       getenv("SHARED_WA_NUMBER", "+18885550100"),
 		WebhookAppSecret:   getenv("WEBHOOK_APP_SECRET", "dev-secret"),

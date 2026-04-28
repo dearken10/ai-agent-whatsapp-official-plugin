@@ -7,7 +7,7 @@ services:
     environment:
       HTTP_ADDR: ":8080"
       ROUTING_BASE_URL: "${ROUTING_BASE_URL:-http://localhost:28080}"
-      STORE_DRIVER: "${STORE_DRIVER:-memory}"
+      STORE_DRIVER: "${STORE_DRIVER:-sqlite}"
       SHARED_WA_NUMBER: "${SHARED_WA_NUMBER:-+18885550100}"
       WEBHOOK_APP_SECRET: "${WEBHOOK_APP_SECRET:-dev-secret}"
       WEBHOOK_VERIFY_TOKEN: "${WEBHOOK_VERIFY_TOKEN:-}"
