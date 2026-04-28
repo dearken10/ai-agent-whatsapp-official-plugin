@@ -38,7 +38,7 @@
     "src"
   ],
   "peerDependencies": {
-    "openclaw": ">=2026.4.15"
+    "openclaw": ">=2026.4.26"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -51,12 +51,12 @@
     ],
     "setupEntry": "./setup-entry.ts",
     "compat": {
-      "pluginApi": ">=2026.4.15",
-      "minGatewayVersion": "2026.4.15"
+      "pluginApi": ">=2026.4.26",
+      "minGatewayVersion": "2026.4.26"
     },
     "build": {
-      "openclawVersion": "2026.4.15",
-      "pluginSdkVersion": "2026.4.15"
+      "openclawVersion": "2026.4.26",
+      "pluginSdkVersion": "2026.4.26"
     },
     "channel": {
       "id": "whatsapp-official",
@@ -71,7 +71,7 @@
     }
   },
   "dependencies": {
-    "openclaw": ">=2026.4.15",
+    "openclaw": ">=2026.4.26",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   },
