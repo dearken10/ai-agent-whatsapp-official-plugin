@@ -1,5 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
+import { createReplyPrefixOptions } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import { CHANNEL_CONFIG_KEY, PLUGIN_ID } from "./constants.js";
 import { getWhatsappOfficialRuntime } from "./runtime.js";
 import { fetchMediaContent, sendOutboundText, sendTypingIndicator } from "./transport.js";
