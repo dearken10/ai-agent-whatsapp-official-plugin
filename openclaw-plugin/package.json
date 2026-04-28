@@ -1,6 +1,6 @@
 {
   "name": "openclaw-channel-whatsapp-official",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Official WhatsApp Business API for OpenClaw — pair via QR in 2 minutes using imBee's verified number. No Meta verification or server setup required. Free tier available; dedicated numbers for enterprise.",
   "author": {
     "name": "imBee Limited",
