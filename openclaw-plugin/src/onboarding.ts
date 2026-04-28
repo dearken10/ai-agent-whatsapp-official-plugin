@@ -26,13 +26,13 @@ export const whatsappOfficialOnboardingAdapter: ChannelSetupWizardAdapter = {
       channel: CHANNEL_CONFIG_KEY,
       configured: account.configured,
       statusLines: account.configured
-        ? [`Paired — instance: ${account.instanceId}`]
-        : ["Not configured — run: openclaw onboard"],
+        ? [`WhatsApp Official API by imBee: configured`]
+        : ["WhatsApp Official API by imBee: not configured"],
     };
   },
 
   configure: async ({ cfg, prompter }) => {
-    await prompter.intro("Official WhatsApp API Setup — by imBee");
+    await prompter.intro("WhatsApp Official API Setup — by imBee");
 
     await prompter.note(
       [
