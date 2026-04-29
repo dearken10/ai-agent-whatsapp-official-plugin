@@ -5,7 +5,7 @@
   "properties": {
     "routingBaseUrl": {
       "type": "string",
-      "description": "Routing server base URL, e.g. http://localhost:28080",
+      "description": "Routing server base URL",
       "default": "https://openclaw-plugin.dev.ent.imbee.io"
     },
     "instanceId": {

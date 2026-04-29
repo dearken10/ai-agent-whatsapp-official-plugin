@@ -54,7 +54,7 @@ export const whatsappOfficialOnboardingAdapter: ChannelSetupWizardAdapter = {
     const routingBaseUrl = await prompter.text({
       message: "Routing server base URL",
       initialValue: existing.routingBaseUrl,
-      placeholder: "http://localhost:28080",
+      placeholder: "https://openclaw-plugin.dev.ent.imbee.io",
       validate: (v) => (v.trim() ? undefined : "Required"),
     });
 
