@@ -167,6 +167,15 @@ export async function dispatchToClaudeStream(
     stderr += String(d);
   });
 
+  // Attach exit/error listeners synchronously, BEFORE the for-await loop on
+  // stdout. If we attached them after the loop, claude could exit fast enough
+  // that the `exit` event fires before we subscribe — listener never called,
+  // the awaited promise hangs forever, and the turn silently never completes.
+  const exitPromise = new Promise<number | null>((resolve, reject) => {
+    child.once("exit", resolve);
+    child.once("error", reject);
+  });
+
   console.log(`claude turn phone=${phone} cwd=${cwd} resume=${resume ?? "(none)"} (streaming)`);
 
   // Persist session id eagerly. If a downstream send/typing call throws inside
@@ -201,6 +210,8 @@ export async function dispatchToClaudeStream(
 
     if (event.type === "assistant") {
       const message = event.message as { content?: Array<Record<string, unknown>> } | undefined;
+      const blockTypes = (message?.content ?? []).map((b) => String(b.type));
+      console.log(`stream assistant blocks=[${blockTypes.join(",")}]`);
       for (const block of message?.content ?? []) {
         if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
           await onEvent({ kind: "text", text: block.text.trim() });
@@ -228,13 +239,10 @@ export async function dispatchToClaudeStream(
     }
   }
 
-  await new Promise<void>((res, rej) => {
-    child.on("exit", (code) => {
-      if (code === 0) res();
-      else rej(new Error(`claude exited ${code}: ${stderr.trim()}`));
-    });
-    child.on("error", rej);
-  });
+  const code = await exitPromise;
+  if (code !== 0) {
+    throw new Error(`claude exited ${code}: ${stderr.trim()}`);
+  }
 
   if (resultError) throw new Error(resultError);
   // Belt-and-suspenders: most session ids are persisted eagerly above; this

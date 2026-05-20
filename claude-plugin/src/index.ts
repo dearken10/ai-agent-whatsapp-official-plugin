@@ -133,13 +133,17 @@ async function handleInbound(
     try {
       const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
         if (event.kind === "text") {
+          const isFirstText = bufferedFinalText === null;
+          console.log(`stream event=text len=${event.text.length} bufferedBefore=${isFirstText ? "(none)" : "yes"}`);
           await flushBuffered(false);
           bufferedFinalText = event.text;
         } else if (event.kind === "tool") {
+          console.log(`stream event=tool name=${event.name}`);
           await flushBuffered(false);
           await sendOutboundText(cfg, from, `… ${event.summary}`);
           heartbeat?.ping();
         } else if (event.kind === "done") {
+          console.log(`stream event=done bufferedFinal=${bufferedFinalText ? bufferedFinalText.length + " chars" : "(empty)"}`);
           // Stop the schedule FIRST so no further typing pings can be
           // initiated, then await all pending pings, THEN send final.
           if (heartbeat) await heartbeat.stop();
