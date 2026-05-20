@@ -3,7 +3,7 @@ import { extname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
-import { fetchMedia, sendOutboundText, sendTypingIndicator } from "./transport.ts";
+import { fetchMedia, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
 import { SessionStore } from "./session-store.ts";
 import { dispatchToClaude, workspaceForPhone } from "./claude-session.ts";
 
@@ -98,17 +98,20 @@ async function handleInbound(
   const prompt = await buildPrompt(cfg, from, envelope.payload);
   if (!prompt) return;
 
-  if (envelope.message_id) {
-    sendTypingIndicator(cfg, envelope.message_id).catch(() => undefined);
-  }
-
   console.log(`inbound from=${from} promptLen=${prompt.length}`);
-  const reply = await dispatchToClaude(cfg, store, from, prompt);
-  console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
-  if (!reply.text) return;
 
-  for (const chunk of chunkText(reply.text)) {
-    await sendOutboundText(cfg, from, chunk);
+  const heartbeat = envelope.message_id
+    ? startTypingHeartbeat(cfg, envelope.message_id)
+    : { stop: (): void => undefined };
+  try {
+    const reply = await dispatchToClaude(cfg, store, from, prompt);
+    console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
+    if (!reply.text) return;
+    for (const chunk of chunkText(reply.text)) {
+      await sendOutboundText(cfg, from, chunk);
+    }
+  } finally {
+    heartbeat.stop();
   }
 }
 
