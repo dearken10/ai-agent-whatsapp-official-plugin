@@ -1,9 +1,63 @@
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import type { SessionStore } from "./session-store.ts";
+
+// Template files copied into each new per-user workspace. Lives next to
+// src/ in the package layout (see claude-plugin/workspace-template/).
+const TEMPLATE_DIR = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "workspace-template",
+);
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Seed the workspace from workspace-template/. Substitutes {{USER_PHONE}}
+// in file contents. Idempotent: existing destination files are left alone
+// so the user (or Claude) can edit them between turns without being
+// overwritten.
+async function seedWorkspace(cwd: string, phone: string): Promise<void> {
+  if (!(await pathExists(TEMPLATE_DIR))) return;
+  await copyTemplate(TEMPLATE_DIR, cwd, { USER_PHONE: phone });
+}
+
+async function copyTemplate(
+  src: string,
+  dst: string,
+  vars: Record<string, string>,
+): Promise<void> {
+  const entries = await readdir(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = join(src, entry.name);
+    const dstPath = join(dst, entry.name);
+    if (entry.isDirectory()) {
+      await mkdir(dstPath, { recursive: true });
+      await copyTemplate(srcPath, dstPath, vars);
+    } else {
+      if (await pathExists(dstPath)) continue;
+      const raw = await readFile(srcPath, "utf8");
+      const rendered = raw.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? `{{${k}}}`);
+      await writeFile(dstPath, rendered);
+    }
+  }
+}
+
+function claudeEnv(phone: string): NodeJS.ProcessEnv {
+  // USER_PHONE is what the workspace's CLAUDE.md / notify-user skill expect.
+  // ROUTING_BASE_URL and ROUTING_API_KEY are already in process.env from .env.
+  return { ...process.env, USER_PHONE: phone };
+}
 
 export type ClaudeReply = {
   text: string;
@@ -40,6 +94,7 @@ export async function dispatchToClaude(
 ): Promise<ClaudeReply> {
   const cwd = workspaceFor(cfg, phone);
   await mkdir(cwd, { recursive: true });
+  await seedWorkspace(cwd, phone);
 
   const resume = store.get(phone);
   const args = [
@@ -54,7 +109,7 @@ export async function dispatchToClaude(
   if (cfg.maxTurns) args.push("--max-turns", String(cfg.maxTurns));
 
   console.log(`claude turn phone=${phone} cwd=${cwd} resume=${resume ?? "(none)"}`);
-  const stdout = await runClaude(cfg.claudeBin, cwd, args);
+  const stdout = await runClaude(cfg.claudeBin, cwd, args, claudeEnv(phone));
   let parsed: ClaudeResult;
   try {
     parsed = JSON.parse(stdout) as ClaudeResult;
@@ -86,6 +141,7 @@ export async function dispatchToClaudeStream(
 ): Promise<{ sessionId: string }> {
   const cwd = workspaceFor(cfg, phone);
   await mkdir(cwd, { recursive: true });
+  await seedWorkspace(cwd, phone);
 
   const resume = store.get(phone);
   const args = [
@@ -103,7 +159,7 @@ export async function dispatchToClaudeStream(
   const child = spawn(cfg.claudeBin, args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
+    env: claudeEnv(phone),
   });
 
   let stderr = "";
@@ -227,12 +283,17 @@ function summarizeTool(name: string, rawInput: unknown): string {
   }
 }
 
-function runClaude(bin: string, cwd: string, args: string[]): Promise<string> {
+function runClaude(
+  bin: string,
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env,
     });
     let stdout = "";
     let stderr = "";
