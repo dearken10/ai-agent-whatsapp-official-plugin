@@ -53,6 +53,7 @@ export async function dispatchToClaude(
   if (resume) args.push("--resume", resume);
   if (cfg.maxTurns) args.push("--max-turns", String(cfg.maxTurns));
 
+  console.log(`claude turn phone=${phone} cwd=${cwd} resume=${resume ?? "(none)"}`);
   const stdout = await runClaude(cfg.claudeBin, cwd, args);
   let parsed: ClaudeResult;
   try {
@@ -68,6 +69,7 @@ export async function dispatchToClaude(
   const text = (parsed.result ?? "").trim();
   const sessionId = parsed.session_id ?? resume ?? "";
   if (sessionId && sessionId !== resume) await store.set(phone, sessionId);
+  console.log(`claude turn done phone=${phone} sessionId=${sessionId || "(none)"}`);
 
   return { text, sessionId };
 }
@@ -109,6 +111,17 @@ export async function dispatchToClaudeStream(
     stderr += String(d);
   });
 
+  console.log(`claude turn phone=${phone} cwd=${cwd} resume=${resume ?? "(none)"} (streaming)`);
+
+  // Persist session id eagerly. If a downstream send/typing call throws inside
+  // the onEvent callback, the for-await loop unwinds and the final store.set
+  // never runs — that would silently drop the new session id and the NEXT
+  // turn would spawn without --resume, starting from a blank history.
+  const persistIfNew = async (id: string): Promise<void> => {
+    if (!id || id === resume) return;
+    await store.set(phone, id);
+  };
+
   let sessionId = resume ?? "";
   let resultError: string | null = null;
   const rl = readline.createInterface({ input: child.stdout });
@@ -123,7 +136,10 @@ export async function dispatchToClaudeStream(
     }
 
     if (event.type === "system" && event.subtype === "init") {
-      if (typeof event.session_id === "string") sessionId = event.session_id;
+      if (typeof event.session_id === "string") {
+        sessionId = event.session_id;
+        await persistIfNew(sessionId);
+      }
       continue;
     }
 
@@ -142,7 +158,10 @@ export async function dispatchToClaudeStream(
     }
 
     if (event.type === "result") {
-      if (typeof event.session_id === "string") sessionId = event.session_id;
+      if (typeof event.session_id === "string") {
+        sessionId = event.session_id;
+        await persistIfNew(sessionId);
+      }
       if (event.is_error) {
         resultError = `claude error (${event.subtype ?? "unknown"}): ${event.result ?? ""}`;
       }
@@ -162,7 +181,10 @@ export async function dispatchToClaudeStream(
   });
 
   if (resultError) throw new Error(resultError);
-  if (sessionId && sessionId !== resume) await store.set(phone, sessionId);
+  // Belt-and-suspenders: most session ids are persisted eagerly above; this
+  // catches the rare case where session_id only showed up after init/result.
+  await persistIfNew(sessionId);
+  console.log(`claude turn done phone=${phone} sessionId=${sessionId || "(none)"} (streaming)`);
   return { sessionId };
 }
 
