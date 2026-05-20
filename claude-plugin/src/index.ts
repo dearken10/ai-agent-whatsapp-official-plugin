@@ -3,7 +3,7 @@ import { extname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
-import { fetchMedia, sendOutboundText, sendTypingIndicator, startTypingHeartbeat } from "./transport.ts";
+import { fetchMedia, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
 import { SessionStore } from "./session-store.ts";
 import { dispatchToClaude, dispatchToClaudeStream, workspaceForPhone } from "./claude-session.ts";
 
@@ -101,51 +101,58 @@ async function handleInbound(
   console.log(`inbound from=${from} promptLen=${prompt.length}`);
 
   if (cfg.streamIntermediate) {
-    // Streaming mode: each outbound message naturally dismisses typing at
-    // Meta. We re-prime typing ~200 ms after every intermediate send so the
-    // indicator reappears between messages. The schedule is cancellable —
-    // when Claude emits the `result` event ("done" in our callback), we
-    // clear any pending schedule before it fires. That way the FINAL reply
-    // doesn't leave "typing…" stuck on for 25 s after Claude has exited.
+    // Streaming mode flow:
+    //   1. inbound message    → start typing heartbeat (recurring refresh)
+    //   2. each intermediate  → send message, then one-shot typing ping
+    //   3. repeat (2) until claude emits `done`
+    //   4. stop typing heartbeat (awaits all in-flight pings)
+    //   5. send final result
+    //
+    // The "final result" is the LAST assistant text in the stream. We buffer
+    // it: each text event flushes any previously-buffered text as an
+    // intermediate; the buffer's contents at `done` time become the final.
+    // Sending the final AFTER the heartbeat stops means no typing ping can
+    // race the final outbound message at Meta — no lingering post-reply
+    // "typing…" indicator.
     const messageId = envelope.message_id;
-    let typingTimer: ReturnType<typeof setTimeout> | null = null;
-    let pendingTyping: Promise<unknown> = Promise.resolve();
-    const scheduleTyping = (): void => {
-      if (!messageId) return;
-      if (typingTimer) clearTimeout(typingTimer);
-      typingTimer = setTimeout(() => {
-        typingTimer = null;
-        pendingTyping = sendTypingIndicator(cfg, messageId).catch(() => undefined);
-      }, 200);
-    };
-    const stopTyping = async (): Promise<void> => {
-      if (typingTimer) clearTimeout(typingTimer);
-      typingTimer = null;
-      await pendingTyping;
-    };
+    const heartbeat = messageId ? startTypingHeartbeat(cfg, messageId) : null;
 
-    if (messageId) {
-      sendTypingIndicator(cfg, messageId).catch(() => undefined);
-    }
+    let bufferedFinalText: string | null = null;
+    const flushBuffered = async (asFinal: boolean): Promise<void> => {
+      if (!bufferedFinalText) return;
+      const text = bufferedFinalText;
+      bufferedFinalText = null;
+      for (const chunk of chunkText(text)) {
+        await sendOutboundText(cfg, from, chunk);
+      }
+      // Intermediates get a follow-up typing ping; the final does NOT —
+      // its purpose is to terminate the turn.
+      if (!asFinal) heartbeat?.ping();
+    };
 
     try {
       const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
         if (event.kind === "text") {
-          for (const chunk of chunkText(event.text)) {
-            await sendOutboundText(cfg, from, chunk);
-          }
-          scheduleTyping();
+          await flushBuffered(false);
+          bufferedFinalText = event.text;
         } else if (event.kind === "tool") {
+          await flushBuffered(false);
           await sendOutboundText(cfg, from, `… ${event.summary}`);
-          scheduleTyping();
+          heartbeat?.ping();
         } else if (event.kind === "done") {
-          await stopTyping();
+          // Stop the schedule FIRST so no further typing pings can be
+          // initiated, then await all pending pings, THEN send final.
+          if (heartbeat) await heartbeat.stop();
+          await flushBuffered(true);
         }
       });
-      await stopTyping();
+      // Belt-and-suspenders for the rare case `done` didn't fire
+      // (e.g. claude exited without a result event).
+      if (heartbeat) await heartbeat.stop();
+      await flushBuffered(true);
       console.log(`claude reply session=${sessionId} (streamed)`);
     } catch (err) {
-      await stopTyping();
+      if (heartbeat) await heartbeat.stop();
       throw err;
     }
     return;
