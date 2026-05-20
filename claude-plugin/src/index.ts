@@ -3,7 +3,7 @@ import { extname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
-import { fetchMedia, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
+import { fetchMedia, sendOutboundText, sendTypingIndicator, startTypingHeartbeat } from "./transport.ts";
 import { SessionStore } from "./session-store.ts";
 import { dispatchToClaude, dispatchToClaudeStream, workspaceForPhone } from "./claude-session.ts";
 
@@ -100,31 +100,47 @@ async function handleInbound(
 
   console.log(`inbound from=${from} promptLen=${prompt.length}`);
 
+  if (cfg.streamIntermediate) {
+    // Streaming mode: no timer-based heartbeat. Each outbound message naturally
+    // dismisses typing; we re-prime typing only after a tool_use status, where
+    // more events from Claude are guaranteed to follow.
+    if (envelope.message_id) {
+      sendTypingIndicator(cfg, envelope.message_id).catch(() => undefined);
+    }
+    const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
+      if (event.kind === "text") {
+        for (const chunk of chunkText(event.text)) {
+          await sendOutboundText(cfg, from, chunk);
+        }
+      } else if (event.kind === "tool") {
+        await sendOutboundText(cfg, from, `… ${event.summary}`);
+        if (envelope.message_id) {
+          sendTypingIndicator(cfg, envelope.message_id).catch(() => undefined);
+        }
+      }
+    });
+    console.log(`claude reply session=${sessionId} (streamed)`);
+    return;
+  }
+
+  // Non-streaming mode: keep the typing indicator alive on a timer while
+  // Claude is working, then STOP the heartbeat (and await any in-flight ping)
+  // BEFORE sending the final reply. Stopping first guarantees Meta sees
+  // /typing settle before /send arrives, so no post-message typing.
   const heartbeat = envelope.message_id
     ? startTypingHeartbeat(cfg, envelope.message_id)
-    : { stop: (): void => undefined };
+    : null;
   try {
-    if (cfg.streamIntermediate) {
-      const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
-        if (event.kind === "text") {
-          for (const chunk of chunkText(event.text)) {
-            await sendOutboundText(cfg, from, chunk);
-          }
-        } else if (event.kind === "tool") {
-          await sendOutboundText(cfg, from, `… ${event.summary}`);
-        }
-      });
-      console.log(`claude reply session=${sessionId} (streamed)`);
-    } else {
-      const reply = await dispatchToClaude(cfg, store, from, prompt);
-      console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
-      if (!reply.text) return;
-      for (const chunk of chunkText(reply.text)) {
-        await sendOutboundText(cfg, from, chunk);
-      }
+    const reply = await dispatchToClaude(cfg, store, from, prompt);
+    console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
+    if (heartbeat) await heartbeat.stop();
+    if (!reply.text) return;
+    for (const chunk of chunkText(reply.text)) {
+      await sendOutboundText(cfg, from, chunk);
     }
-  } finally {
-    heartbeat.stop();
+  } catch (err) {
+    if (heartbeat) await heartbeat.stop();
+    throw err;
   }
 }
 

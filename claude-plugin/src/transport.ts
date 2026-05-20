@@ -27,24 +27,28 @@ export async function sendTypingIndicator(cfg: Config, messageId: string): Promi
 
 // WhatsApp Cloud API typing indicator auto-dismisses after ~25 seconds,
 // or when the business sends a message. Refresh every 20 s so it stays
-// visible across long Claude turns. Caller invokes stop() when done.
+// visible across long Claude turns. Caller MUST `await stop()` — it
+// awaits any in-flight ping so the next send isn't racing a typing call
+// (the race causes post-message "typing…" that lingers 25 s).
 const TYPING_REFRESH_MS = 20_000;
 
 export function startTypingHeartbeat(
   cfg: Config,
   messageId: string,
-): { stop: () => void } {
+): { stop: () => Promise<void> } {
   let stopped = false;
+  let pending: Promise<unknown> = Promise.resolve();
   const tick = (): void => {
     if (stopped) return;
-    sendTypingIndicator(cfg, messageId).catch(() => undefined);
+    pending = sendTypingIndicator(cfg, messageId).catch(() => undefined);
   };
   tick();
   const timer = setInterval(tick, TYPING_REFRESH_MS);
   return {
-    stop: () => {
+    stop: async (): Promise<void> => {
       stopped = true;
       clearInterval(timer);
+      await pending;
     },
   };
 }
