@@ -6,6 +6,7 @@ export type Config = {
   sessionStorePath: string;
   permissionMode: "default" | "acceptEdits" | "bypassPermissions" | "plan";
   maxTurns: number | null;
+  streamIntermediate: boolean;
 };
 
 function required(name: string): string {
@@ -25,6 +26,7 @@ export function loadConfig(): Config {
     sessionStorePath: process.env.SESSION_STORE_PATH ?? "./data/sessions.json",
     permissionMode: (process.env.CLAUDE_PERMISSION_MODE ?? "default") as Config["permissionMode"],
     maxTurns: maxTurns && Number.isFinite(maxTurns) ? maxTurns : null,
+    streamIntermediate: /^(1|true|yes)$/i.test(process.env.CLAUDE_STREAM_INTERMEDIATE ?? ""),
   };
 }
 

@@ -5,7 +5,7 @@ import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
 import { fetchMedia, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
 import { SessionStore } from "./session-store.ts";
-import { dispatchToClaude, workspaceForPhone } from "./claude-session.ts";
+import { dispatchToClaude, dispatchToClaudeStream, workspaceForPhone } from "./claude-session.ts";
 
 type WsEnvelope = {
   type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "HEARTBEAT" | "ERROR";
@@ -104,11 +104,24 @@ async function handleInbound(
     ? startTypingHeartbeat(cfg, envelope.message_id)
     : { stop: (): void => undefined };
   try {
-    const reply = await dispatchToClaude(cfg, store, from, prompt);
-    console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
-    if (!reply.text) return;
-    for (const chunk of chunkText(reply.text)) {
-      await sendOutboundText(cfg, from, chunk);
+    if (cfg.streamIntermediate) {
+      const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
+        if (event.kind === "text") {
+          for (const chunk of chunkText(event.text)) {
+            await sendOutboundText(cfg, from, chunk);
+          }
+        } else if (event.kind === "tool") {
+          await sendOutboundText(cfg, from, `… ${event.summary}`);
+        }
+      });
+      console.log(`claude reply session=${sessionId} (streamed)`);
+    } else {
+      const reply = await dispatchToClaude(cfg, store, from, prompt);
+      console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
+      if (!reply.text) return;
+      for (const chunk of chunkText(reply.text)) {
+        await sendOutboundText(cfg, from, chunk);
+      }
     }
   } finally {
     heartbeat.stop();

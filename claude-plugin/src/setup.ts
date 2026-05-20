@@ -231,6 +231,14 @@ async function main(): Promise<void> {
     }),
   ).trim();
 
+  const streamIntermediate = unwrap(
+    await confirm({
+      message:
+        "Stream Claude's intermediate text and tool calls to WhatsApp? (more visibility, more messages)",
+      initialValue: /^(1|true|yes)$/i.test(process.env.CLAUDE_STREAM_INTERMEDIATE ?? ""),
+    }),
+  );
+
   if (existsSync(ENV_PATH)) {
     const ok = unwrap(
       await confirm({
@@ -247,6 +255,7 @@ async function main(): Promise<void> {
     CLAUDE_BIN: claudeBin,
     CLAUDE_WORKSPACE_ROOT: workspaceRoot,
     CLAUDE_PERMISSION_MODE: permissionMode,
+    CLAUDE_STREAM_INTERMEDIATE: String(streamIntermediate),
   });
 
   outro(

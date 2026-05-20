@@ -95,6 +95,7 @@ If you just want the apiKey without the interactive flow (e.g. scripting), `npm 
 | `SESSION_STORE_PATH` | `./data/sessions.json` | Phone → session id persistence |
 | `CLAUDE_PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `bypassPermissions` / `plan` |
 | `CLAUDE_MAX_TURNS` | (unset) | Optional cap on agent turns per inbound message |
+| `CLAUDE_STREAM_INTERMEDIATE` | `false` | When `true`, intermediate assistant text and tool-use status lines are forwarded to WhatsApp as separate messages while Claude is working (uses `--output-format stream-json`). When `false`, only the final reply is sent (uses `--output-format json`). |
 
 ## Permission mode warning
 
