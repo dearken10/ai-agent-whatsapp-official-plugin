@@ -53,17 +53,25 @@ Each turn is a fresh `claude` process — but Claude Code treats them as a singl
 
 ```bash
 cd claude-plugin
-npm install
-cp .env.example .env
-
-# Pair: prints a CLAW-XXXX code + wa.me link, prints apiKey on success
-npm run pair
-
-# Put the apiKey into .env as ROUTING_API_KEY, then start the bridge
-npm start
+npm run setup     # installs deps, pairs WhatsApp, writes .env, then starts the bridge
 ```
 
-Send a WhatsApp message to the shared imBee number — the local `claude` CLI handles it and the reply goes back over WhatsApp.
+(Re-running the bridge later, after the first-time setup: just `npm start`.)
+
+The setup flow mirrors `openclaw-plugin/src/onboarding.ts`:
+
+1. Verifies the `claude` CLI is installed and runnable.
+2. Pings the backend `/healthz`.
+3. Requests a pairing code and renders it as a QR + `wa.me` link + 8-char code.
+4. Waits on the backend WebSocket for `PAIRING_COMPLETE` — no manual confirmation needed; just send the code from WhatsApp.
+5. Asks for permission mode and workspace root.
+6. Writes the merged config into `./.env`.
+
+Once setup finishes, the bridge launches automatically and forwards every inbound WhatsApp message into the local `claude` CLI.
+
+### Headless alternative
+
+If you just want the apiKey without the interactive flow (e.g. scripting), `npm run pair` is the minimal version: it prints the pairing code, prints the apiKey, and exits when `PAIRING_COMPLETE` arrives. You then fill `.env` yourself.
 
 ## Files
 
@@ -73,7 +81,8 @@ Send a WhatsApp message to the shared imBee number — the local `claude` CLI ha
 | `src/claude-session.ts` | Spawns `claude -p --resume <sid> --output-format json` per turn. Parses the result. |
 | `src/session-store.ts` | Persists `phone → claude session_id` to a JSON file on disk. |
 | `src/transport.ts` | HTTP calls into the backend (send, typing, media fetch). |
-| `src/pair.ts` | Headless pairing helper. |
+| `src/setup.ts` | Guided setup — ports the openclaw onboarding flow (QR + clack prompts). |
+| `src/pair.ts` | Headless pairing helper (for scripted/non-interactive setup). |
 
 ## Configuration
 

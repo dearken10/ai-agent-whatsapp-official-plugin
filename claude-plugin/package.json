@@ -10,13 +10,17 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env --experimental-strip-types src/index.ts",
+    "setup": "npm install --no-audit --no-fund --loglevel=error && node --env-file-if-exists=.env --experimental-strip-types src/setup.ts && npm start",
     "pair": "node --env-file-if-exists=.env --experimental-strip-types src/pair.ts"
   },
   "dependencies": {
+    "@clack/prompts": "^0.7.0",
+    "qrcode": "^1.5.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.5",
     "@types/ws": "^8.5.10"
   }
 }
