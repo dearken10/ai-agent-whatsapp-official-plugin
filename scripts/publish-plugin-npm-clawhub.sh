@@ -10,8 +10,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 ENV_FILE="$REPO_ROOT/.env.dev"
-TRANSPORT_FILE="$REPO_ROOT/plugin/src/transport.ts"
-SCHEMA_FILE="$REPO_ROOT/plugin/schema/config.json"
+TRANSPORT_FILE="$REPO_ROOT/openclaw-plugin/src/transport.ts"
+SCHEMA_FILE="$REPO_ROOT/openclaw-plugin/schema/config.json"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,7 +42,7 @@ sed -i '' "s|\"default\": \"http[^\"]*\"|\"default\": \"${ROUTING_BASE_URL}\"|" 
 
 # ── Publish ───────────────────────────────────────────────────────────────────
 
-PLUGIN_DIR="$REPO_ROOT/plugin"
+PLUGIN_DIR="$REPO_ROOT/openclaw-plugin"
 VERSION=$(node -p "require('$PLUGIN_DIR/package.json').version")
 REPO="${CLAWHUB_REPO:-dearken10/openclaw-whatsapp-plugin}"
 SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -65,7 +65,7 @@ clawhub package publish "$PLUGIN_DIR" \
   --family code-plugin \
   --source-repo "$REPO" \
   --source-commit "$SHA" \
-  --source-path plugin
+  --source-path openclaw-plugin
 
 echo ""
 echo "✓ Published openclaw-channel-whatsapp-official@$VERSION"
