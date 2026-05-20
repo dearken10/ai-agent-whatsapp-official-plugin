@@ -101,25 +101,53 @@ async function handleInbound(
   console.log(`inbound from=${from} promptLen=${prompt.length}`);
 
   if (cfg.streamIntermediate) {
-    // Streaming mode: no timer-based heartbeat. Each outbound message naturally
-    // dismisses typing; we re-prime typing only after a tool_use status, where
-    // more events from Claude are guaranteed to follow.
-    if (envelope.message_id) {
-      sendTypingIndicator(cfg, envelope.message_id).catch(() => undefined);
+    // Streaming mode: each outbound message naturally dismisses typing at
+    // Meta. We re-prime typing ~200 ms after every intermediate send so the
+    // indicator reappears between messages. The schedule is cancellable —
+    // when Claude emits the `result` event ("done" in our callback), we
+    // clear any pending schedule before it fires. That way the FINAL reply
+    // doesn't leave "typing…" stuck on for 25 s after Claude has exited.
+    const messageId = envelope.message_id;
+    let typingTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingTyping: Promise<unknown> = Promise.resolve();
+    const scheduleTyping = (): void => {
+      if (!messageId) return;
+      if (typingTimer) clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => {
+        typingTimer = null;
+        pendingTyping = sendTypingIndicator(cfg, messageId).catch(() => undefined);
+      }, 200);
+    };
+    const stopTyping = async (): Promise<void> => {
+      if (typingTimer) clearTimeout(typingTimer);
+      typingTimer = null;
+      await pendingTyping;
+    };
+
+    if (messageId) {
+      sendTypingIndicator(cfg, messageId).catch(() => undefined);
     }
-    const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
-      if (event.kind === "text") {
-        for (const chunk of chunkText(event.text)) {
-          await sendOutboundText(cfg, from, chunk);
+
+    try {
+      const { sessionId } = await dispatchToClaudeStream(cfg, store, from, prompt, async (event) => {
+        if (event.kind === "text") {
+          for (const chunk of chunkText(event.text)) {
+            await sendOutboundText(cfg, from, chunk);
+          }
+          scheduleTyping();
+        } else if (event.kind === "tool") {
+          await sendOutboundText(cfg, from, `… ${event.summary}`);
+          scheduleTyping();
+        } else if (event.kind === "done") {
+          await stopTyping();
         }
-      } else if (event.kind === "tool") {
-        await sendOutboundText(cfg, from, `… ${event.summary}`);
-        if (envelope.message_id) {
-          sendTypingIndicator(cfg, envelope.message_id).catch(() => undefined);
-        }
-      }
-    });
-    console.log(`claude reply session=${sessionId} (streamed)`);
+      });
+      await stopTyping();
+      console.log(`claude reply session=${sessionId} (streamed)`);
+    } catch (err) {
+      await stopTyping();
+      throw err;
+    }
     return;
   }
 

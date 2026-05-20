@@ -12,7 +12,8 @@ export type ClaudeReply = {
 
 export type StreamEvent =
   | { kind: "text"; text: string }
-  | { kind: "tool"; name: string; summary: string };
+  | { kind: "tool"; name: string; summary: string }
+  | { kind: "done" };
 
 type ClaudeResult = {
   result?: string;
@@ -145,6 +146,10 @@ export async function dispatchToClaudeStream(
       if (event.is_error) {
         resultError = `claude error (${event.subtype ?? "unknown"}): ${event.result ?? ""}`;
       }
+      // Signal end-of-turn while the stream is still being read, so the
+      // caller can cancel any pending post-message typing schedule before
+      // it fires and leaves typing visible 25 s after the final reply.
+      await onEvent({ kind: "done" });
     }
   }
 
