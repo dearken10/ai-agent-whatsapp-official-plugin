@@ -1,0 +1,22 @@
+{
+  "name": "claude-plugin",
+  "version": "0.1.0",
+  "description": "Forward inbound WhatsApp messages (via the imBee routing backend) into a local Claude Code CLI session per paired sender.",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --experimental-strip-types src/index.ts",
+    "pair": "node --env-file-if-exists=.env --experimental-strip-types src/pair.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10"
+  }
+}
