@@ -7,3 +7,5 @@ tmp/
 # claude-plugin per-user runtime state
 claude-plugin/data/
 claude-plugin/workspaces/
+claude-plugin/logs/
+claude-plugin/*.log
