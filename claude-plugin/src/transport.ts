@@ -34,7 +34,7 @@ export async function sendTypingIndicator(cfg: Config, messageId: string): Promi
 // .ping() lets callers fire a one-shot typing refresh in addition to the
 // recurring schedule — useful right after sending an intermediate message,
 // to bring the indicator back as quickly as possible.
-const TYPING_REFRESH_MS = 20_000;
+const TYPING_REFRESH_MS = 26_000;
 
 export function startTypingHeartbeat(
   cfg: Config,
