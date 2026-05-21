@@ -33,12 +33,18 @@ const PAIRING_WAIT_MS = 10 * 60 * 1000;
 
 type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
 
+type PairMode = "single_use" | "persistent";
+
 type PairResult = {
+  mode: string;
   instanceId: string;
   pairingCode: string;
   apiKey: string;
   waMeUrl: string;
-  expiresAt: string;
+  /** Defined only for single_use mode */
+  expiresAt?: string;
+  /** Defined only for persistent mode */
+  inviteId?: string;
 };
 
 function bail(message: string): never {
@@ -73,11 +79,11 @@ async function checkClaudeCli(bin: string): Promise<string | null> {
   }
 }
 
-async function requestPairing(baseUrl: string): Promise<PairResult> {
+async function requestPairing(baseUrl: string, mode: PairMode): Promise<PairResult> {
   const res = await fetch(`${baseUrl}/api/v1/pair/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error(`pair request failed: ${res.status}`);
   return (await res.json()) as PairResult;
@@ -181,11 +187,30 @@ async function main(): Promise<void> {
     bail(`Could not reach ${routingBaseUrl}: ${String(err)}`);
   }
 
+  const mode = unwrap(
+    await select<PairMode>({
+      message: "Pairing mode",
+      initialValue: "single_use",
+      options: [
+        {
+          value: "single_use",
+          label: "Single-Use (Recommended)",
+          hint: "One QR pairs exactly one phone — expires in 10 minutes",
+        },
+        {
+          value: "persistent",
+          label: "Persistent Invite",
+          hint: "Reusable link — any phone that sends the code is paired and gets its own Claude workspace",
+        },
+      ],
+    }),
+  );
+
   const pairSpinner = spinner();
   pairSpinner.start("Requesting pairing code…");
   let pair: PairResult;
   try {
-    pair = await requestPairing(routingBaseUrl);
+    pair = await requestPairing(routingBaseUrl, mode);
     pairSpinner.stop("Pairing code issued");
   } catch (err) {
     pairSpinner.stop("Failed to request pairing code");
@@ -196,19 +221,38 @@ async function main(): Promise<void> {
   // the QR module spacing (same caveat documented in openclaw onboarding.ts).
   const qr = await renderQr(pair.waMeUrl).catch(() => "");
   if (qr) process.stdout.write(`\n${qr}\n`);
-  note(
-    `Scan the QR above or open this link:\n${pair.waMeUrl}\n\nThen send this code to the imBee number when WhatsApp prompts:\n\n  ${pair.pairingCode}`,
-    "Pair on WhatsApp",
-  );
 
-  const waitSpinner = spinner();
-  waitSpinner.start("Waiting for WhatsApp to deliver the pairing code…");
-  try {
-    await waitForPairingComplete(routingBaseUrl, pair.apiKey);
-    waitSpinner.stop("Paired successfully");
-  } catch (err) {
-    waitSpinner.stop("Pairing not completed");
-    bail(String(err));
+  if (mode === "persistent") {
+    note(
+      [
+        "This is a Persistent Invite — a reusable pairing link.",
+        "Share the QR or link above with anyone who should reach your Claude session.",
+        "Every phone that sends the code is paired automatically and gets its own workspace.",
+        "",
+        `Link:  ${pair.waMeUrl}`,
+        `Code:  ${pair.pairingCode}`,
+        "",
+        "⚠  Anyone with this link can pair and drive your local Claude CLI.",
+        "   Only share it with people you trust to run code on this machine.",
+      ].join("\n"),
+      "Persistent Invite — share with your users",
+    );
+    // Persistent: the invite is already live — don't block setup waiting for a scan.
+  } else {
+    note(
+      `Scan the QR above or open this link:\n${pair.waMeUrl}\n\nThen send this code to the imBee number when WhatsApp prompts:\n\n  ${pair.pairingCode}`,
+      "Pair on WhatsApp",
+    );
+
+    const waitSpinner = spinner();
+    waitSpinner.start("Waiting for WhatsApp to deliver the pairing code…");
+    try {
+      await waitForPairingComplete(routingBaseUrl, pair.apiKey);
+      waitSpinner.stop("Paired successfully");
+    } catch (err) {
+      waitSpinner.stop("Pairing not completed");
+      bail(String(err));
+    }
   }
 
   const permissionMode = unwrap(
@@ -258,11 +302,16 @@ async function main(): Promise<void> {
     CLAUDE_STREAM_INTERMEDIATE: String(streamIntermediate),
   });
 
+  const startedLine =
+    mode === "persistent"
+      ? `Starting the bridge now — any phone that scans the invite link will pair and reach \`${claudeBin}\`.`
+      : `Starting the bridge now — message the imBee shared number from your paired phone and \`${claudeBin}\` will reply.`;
+
   outro(
     [
       `Saved ${ENV_PATH}`,
       "",
-      `Starting the bridge now — message the imBee shared number from your paired phone and \`${claudeBin}\` will reply.`,
+      startedLine,
       "",
       "(Stop with Ctrl-C. Restart later with `npm start`.)",
     ].join("\n"),
