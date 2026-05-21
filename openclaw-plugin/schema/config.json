@@ -16,10 +16,18 @@
       "type": "string",
       "description": "Bearer token returned by POST /api/v1/pair/request (store via OpenClaw secrets when available)"
     },
+    "inviteId": {
+      "type": "string",
+      "description": "Persistent invite ID returned when pairing mode is 'persistent'. Used to revoke the invite later."
+    },
     "allowFrom": {
       "type": "array",
       "items": { "type": "string" },
       "description": "E.164 allowlist for inbound WhatsApp senders"
+    },
+    "dmDenyMessage": {
+      "type": "string",
+      "description": "Reply sent to senders blocked by dmPolicy: allowlist. Defaults to a generic 'not authorised' message if omitted."
     },
     "defaultTo": {
       "type": "string",

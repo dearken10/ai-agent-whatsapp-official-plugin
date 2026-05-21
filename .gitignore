@@ -3,6 +3,7 @@
 .env.prod
 node_modules/
 tmp/
+.claude/
 
 # claude-plugin per-user runtime state
 claude-plugin/data/

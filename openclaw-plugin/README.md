@@ -88,6 +88,61 @@ Then select **WhatsApp Official API by imBee** from the channel list and follow 
 
 ---
 
+## Controlling who can reach your agent
+
+After pairing, the plugin exposes two config fields that control which WhatsApp senders your agent will respond to.
+
+### `dmPolicy`
+
+| Value | Behaviour |
+| :--- | :--- |
+| `open` *(default)* | Any paired phone number can message your agent |
+| `allowlist` | Only numbers explicitly listed in `allowFrom` can message your agent |
+| `disabled` | All inbound DMs are silently ignored (outbound-only mode) |
+
+### `allowFrom`
+
+A list of E.164 phone numbers that are permitted to reach your agent. Only used when `dmPolicy` is `allowlist`.
+
+### `dmDenyMessage`
+
+The reply sent to a sender who is blocked by `dmPolicy: allowlist`. If omitted, the plugin sends a built-in default:
+
+> *"You are not authorised to use this service. Please contact the service owner for access."*
+
+Set this to include your own contact details so blocked users know who to reach out to.
+
+### Example config
+
+```yaml
+channels:
+  whatsapp-official:
+    routingBaseUrl: "https://openclaw-plugin.dev.ent.imbee.io"
+    instanceId: "your-instance-id"
+    apiKey: "imbee_…"
+    dmPolicy: allowlist
+    allowFrom:
+      - "+85296663768"
+      - "+85261234567"
+    dmDenyMessage: "Sorry, this assistant is for staff only. Contact hr@company.com to request access."
+```
+
+With this config, the two listed numbers can message your agent normally. Any other sender receives the `dmDenyMessage` reply and the message never reaches your agent.
+
+### ⚠️ Persistent Invite and the open-door risk
+
+When you use a **Persistent Invite** code, the same `wa.me` link can pair any number of contacts to your agent. This is intentional — it is designed for sharing. But it means:
+
+> **Anyone who receives or guesses the link can pair and start sending messages to your agent.**
+
+If you share a Persistent Invite publicly (e.g. in a QR code on a poster or a website), set `dmPolicy: allowlist` and keep `allowFrom` up to date, or use `dmPolicy: disabled` to pause the agent while you are not monitoring it.
+
+For a **Single-Use** code the risk is lower because each code pairs exactly one number and expires in 10 minutes, but `allowlist` is still the right choice for any production or business deployment where you know exactly who should have access.
+
+> **Tip:** you can change `dmPolicy` at any time without re-pairing — edit your OpenClaw config file and restart the gateway.
+
+---
+
 ## Requirements
 
 - OpenClaw ≥ 2026.4.15
@@ -114,6 +169,12 @@ No — API keys are issued once and not stored by imBee. Run `openclaw channels 
 
 **Can someone else pair my phone number to their agent?**
 Only if they obtain a valid pairing code and trick you into sending it via WhatsApp. Codes are short-lived (10 minutes), single-use, and sent to a specific `wa.me` URL — treat them like one-time passwords. If you suspect a code was misused, re-pair immediately to invalidate the old session.
+
+**I shared a Persistent Invite link publicly and now strangers are messaging my agent. How do I stop this?**
+Two options. Quick fix: add `dmPolicy: allowlist` and list only the numbers you want in `allowFrom` in your OpenClaw config, then restart the gateway — unapproved senders are immediately silenced. Nuclear option: revoke the invite with `openclaw channels manage`, which disconnects all phones paired via that code, then generate a fresh invite and share it more carefully.
+
+**Can I allow some users but not others without re-pairing everyone?**
+Yes. Set `dmPolicy: allowlist` and maintain the `allowFrom` list in your config. Adding or removing a number takes effect after a gateway restart — no re-pairing needed. Blocked senders automatically receive your `dmDenyMessage` so they know who to contact for access.
 
 **What WhatsApp message types are supported?**
 Text, images, video, audio, voice notes, stickers, and documents. Images are passed to your agent as base64 data URIs so vision-capable models can read them directly. All other media types are described in text (filename, type, size).

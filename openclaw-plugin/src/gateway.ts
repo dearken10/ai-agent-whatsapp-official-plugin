@@ -86,7 +86,10 @@ export async function startWhatsappOfficialGatewayAccount(
           try {
             const envelope = JSON.parse(String(raw)) as WsEnvelope;
             if (envelope.type === "PAIRING_COMPLETE") {
-              ctx.log?.info(`${PLUGIN_ID}: pairing complete`);
+              const phone = String(envelope.payload.phoneNumber ?? "unknown");
+              const mode = String(envelope.payload.pairingMode ?? "single_use");
+              const inviteId = envelope.payload.inviteId ? ` invite=${String(envelope.payload.inviteId)}` : "";
+              ctx.log?.info(`${PLUGIN_ID}: pairing complete phone=${phone} mode=${mode}${inviteId}`);
               return;
             }
             if (envelope.type !== "INBOUND_MESSAGE") {

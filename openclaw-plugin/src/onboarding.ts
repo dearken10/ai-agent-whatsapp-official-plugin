@@ -58,11 +58,37 @@ export const whatsappOfficialOnboardingAdapter: ChannelSetupWizardAdapter = {
       validate: (v) => (v.trim() ? undefined : "Required"),
     });
 
+    // Mode selector: Single-Use vs Persistent Invite
+    const mode = await prompter.select<"single_use" | "persistent">({
+      message: "Pairing mode",
+      options: [
+        {
+          value: "single_use",
+          label: "Single-Use (Recommended)",
+          hint: "One QR code pairs exactly one phone — expires in 10 minutes",
+        },
+        {
+          value: "persistent",
+          label: "Persistent Invite",
+          hint: "Reusable link — any phone that sends the code is paired to your agent; use dmPolicy: allowlist to restrict access",
+        },
+      ],
+      initialValue: "single_use",
+    });
+
     const progress = prompter.progress("Requesting pairing code…");
     progress.update("Requesting pairing code…");
-    let pairResult: { instanceId: string; pairingCode: string; apiKey: string; waMeUrl: string };
+    let pairResult: {
+      mode: string;
+      instanceId: string;
+      pairingCode: string;
+      apiKey: string;
+      waMeUrl: string;
+      expiresAt?: string;
+      inviteId?: string;
+    };
     try {
-      pairResult = await requestPairingCode(routingBaseUrl.trim());
+      pairResult = await requestPairingCode(routingBaseUrl.trim(), mode);
       progress.stop("Pairing code issued");
     } catch (err) {
       progress.stop("Failed to contact routing server");
@@ -74,30 +100,82 @@ export const whatsappOfficialOnboardingAdapter: ChannelSetupWizardAdapter = {
     // which destroys the QR module spacing and renders it unscannable.
     const qrDisplay = await renderQr(pairResult.waMeUrl).catch(() => "");
     if (qrDisplay) process.stdout.write(`\n${qrDisplay}\n`);
-    await prompter.note(
-      `Scan the QR code above, or open this link:\n${pairResult.waMeUrl}\n\nEnter the pairing code when WhatsApp prompts:\n\n  ${pairResult.pairingCode}`,
-      "Scan to Pair",
-    );
 
-    await prompter.confirm({
-      message: "Have you entered the pairing code in WhatsApp?",
-      initialValue: true,
-    });
+    if (mode === "persistent") {
+      await prompter.note(
+        [
+          "This is a Persistent Invite — a reusable pairing link.",
+          "",
+          "Share the QR code or link above with anyone who should reach your agent.",
+          "Every phone that sends the code will be paired automatically.",
+          "",
+          "Scan the QR code above, or open this link:",
+          pairResult.waMeUrl,
+          "",
+          "⚠  IMPORTANT: Anyone with this link can pair and message your agent.",
+          "   Set dmPolicy: allowlist in your config to restrict access.",
+          "",
+          "To revoke the invite later:",
+          "  openclaw channels manage → revoke invite",
+        ].join("\n"),
+        "Persistent Invite — Share with your users",
+      );
+      // For persistent mode, don't wait for scan confirmation — the invite is already
+      // live and can be scanned at any time.
+    } else {
+      await prompter.note(
+        `Scan the QR code above, or open this link:\n${pairResult.waMeUrl}\n\nEnter the pairing code when WhatsApp prompts:\n\n  ${pairResult.pairingCode}`,
+        "Scan to Pair",
+      );
+
+      await prompter.confirm({
+        message: "Have you entered the pairing code in WhatsApp?",
+        initialValue: true,
+      });
+    }
 
     const channels = (cfg as { channels?: Record<string, unknown> }).channels ?? {};
     const currentSection = (channels[CHANNEL_CONFIG_KEY] as Record<string, unknown> | undefined) ?? {};
+    const newChannelSection: Record<string, unknown> = {
+      ...currentSection,
+      routingBaseUrl: routingBaseUrl.trim(),
+      instanceId: pairResult.instanceId,
+      apiKey: pairResult.apiKey,
+    };
+    if (pairResult.inviteId) {
+      newChannelSection.inviteId = pairResult.inviteId;
+    }
     const newCfg = {
       ...(cfg as Record<string, unknown>),
       channels: {
         ...channels,
-        [CHANNEL_CONFIG_KEY]: {
-          ...currentSection,
-          routingBaseUrl: routingBaseUrl.trim(),
-          instanceId: pairResult.instanceId,
-          apiKey: pairResult.apiKey,
-        },
+        [CHANNEL_CONFIG_KEY]: newChannelSection,
       },
     } as OpenClawConfig;
+
+    await prompter.note(
+      [
+        "By default any paired WhatsApp number can message your agent.",
+        "To restrict access, add the following to your OpenClaw config:",
+        "",
+        "  channels:",
+        `    ${CHANNEL_CONFIG_KEY}:`,
+        "      dmPolicy: allowlist",
+        "      allowFrom:",
+        '        - "+1234567890"   # ← numbers you want to allow',
+        '      dmDenyMessage: "Sorry, you are not authorised. Contact owner@example.com for access."',
+        "",
+        "Blocked senders receive dmDenyMessage automatically.",
+        "Omit it to use the built-in default reply.",
+        "",
+        "⚠  This is especially important with a Persistent Invite code.",
+        "   Anyone who receives the wa.me link can pair and reach your agent.",
+        "   Lock it down with dmPolicy: allowlist once you know your users.",
+        "",
+        "Changes take effect after restarting the gateway — no re-pairing needed.",
+      ].join("\n"),
+      "Protect your agent (optional)",
+    );
 
     await prompter.outro(
       "Paired! Restart the gateway to go live.\n\n" +

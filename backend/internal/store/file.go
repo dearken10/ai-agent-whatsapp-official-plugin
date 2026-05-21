@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // fileStore is a JSON-backed persistent store. All records are kept in memory
@@ -18,24 +20,30 @@ import (
 //
 //	{
 //	  "records":      [ ...PairingRecord... ],
-//	  "pairRequests": { "instanceId": ["2026-04-23T10:00:00Z", ...] }
+//	  "invites":      [ ...PersistentInvite... ],
+//	  "pairRequests": { "ip": ["2026-04-23T10:00:00Z", ...] }
 //	}
 type fileStore struct {
 	mu       sync.RWMutex
 	path     string
 	records  []*PairingRecord
+	invites  []*PersistentInvite
 	pairReqs map[string][]time.Time
 
 	// secondary indexes rebuilt on load / mutated in-place
-	byCode   map[string]*PairingRecord
-	byPhone  map[string]*PairingRecord
-	byAPIKey map[string]*PairingRecord
+	byCode          map[string]*PairingRecord
+	byPhone         map[string]*PairingRecord
+	byAPIKey        map[string]*PairingRecord
+	byInviteID      map[string]*PersistentInvite
+	byInviteCode    map[string]*PersistentInvite
+	byInviteAPIKey  map[string]*PersistentInvite
 }
 
 // fileData is the on-disk JSON shape.
 type fileData struct {
-	Records      []*PairingRecord          `json:"records"`
-	PairRequests map[string][]time.Time    `json:"pairRequests"`
+	Records      []*PairingRecord       `json:"records"`
+	Invites      []*PersistentInvite    `json:"invites,omitempty"`
+	PairRequests map[string][]time.Time `json:"pairRequests"`
 }
 
 // NewFile opens (or creates) a JSON store at path.
@@ -45,11 +53,14 @@ func NewFile(path string) (*fileStore, error) {
 	}
 
 	fs := &fileStore{
-		path:     path,
-		byCode:   map[string]*PairingRecord{},
-		byPhone:  map[string]*PairingRecord{},
-		byAPIKey: map[string]*PairingRecord{},
-		pairReqs: map[string][]time.Time{},
+		path:           path,
+		byCode:         map[string]*PairingRecord{},
+		byPhone:        map[string]*PairingRecord{},
+		byAPIKey:       map[string]*PairingRecord{},
+		byInviteID:     map[string]*PersistentInvite{},
+		byInviteCode:   map[string]*PersistentInvite{},
+		byInviteAPIKey: map[string]*PersistentInvite{},
+		pairReqs:       map[string][]time.Time{},
 	}
 
 	data, err := os.ReadFile(path)
@@ -62,6 +73,7 @@ func NewFile(path string) (*fileStore, error) {
 			return nil, fmt.Errorf("file store: parse %s: %w", path, err)
 		}
 		fs.records = fd.Records
+		fs.invites = fd.Invites
 		if fd.PairRequests != nil {
 			fs.pairReqs = fd.PairRequests
 		}
@@ -70,7 +82,7 @@ func NewFile(path string) (*fileStore, error) {
 	return fs, nil
 }
 
-// rebuildIndexes populates the in-memory lookup maps from fs.records.
+// rebuildIndexes populates the in-memory lookup maps from fs.records and fs.invites.
 // Must be called with the write lock held (or before the store is shared).
 func (fs *fileStore) rebuildIndexes() {
 	fs.byCode = map[string]*PairingRecord{}
@@ -87,7 +99,21 @@ func (fs *fileStore) rebuildIndexes() {
 				fs.byPhone[r.PhoneNumber] = r
 			}
 		}
-		fs.byAPIKey[r.APIKey] = r
+		// For persistent mode, multiple records share the same APIKey.
+		// Keep the most recently updated one for the byAPIKey index.
+		existing, ok := fs.byAPIKey[r.APIKey]
+		if !ok || r.UpdatedAt.After(existing.UpdatedAt) {
+			fs.byAPIKey[r.APIKey] = r
+		}
+	}
+
+	fs.byInviteID = map[string]*PersistentInvite{}
+	fs.byInviteCode = map[string]*PersistentInvite{}
+	fs.byInviteAPIKey = map[string]*PersistentInvite{}
+	for _, inv := range fs.invites {
+		fs.byInviteID[inv.ID] = inv
+		fs.byInviteCode[inv.Code] = inv
+		fs.byInviteAPIKey[inv.APIKey] = inv
 	}
 }
 
@@ -96,6 +122,7 @@ func (fs *fileStore) rebuildIndexes() {
 func (fs *fileStore) flush() error {
 	fd := fileData{
 		Records:      fs.records,
+		Invites:      fs.invites,
 		PairRequests: fs.pairReqs,
 	}
 	data, err := json.MarshalIndent(fd, "", "  ")
@@ -176,6 +203,81 @@ func (fs *fileStore) ActivatePairing(code string, phone string, now time.Time) (
 	record.UpdatedAt = now
 	delete(fs.byCode, code)
 	fs.byPhone[phone] = record
+
+	return record, fs.flush()
+}
+
+// --- Persistent invite methods ---
+
+func (fs *fileStore) CreateInvite(invite *PersistentInvite) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.invites = append(fs.invites, invite)
+	fs.byInviteID[invite.ID] = invite
+	fs.byInviteCode[invite.Code] = invite
+	fs.byInviteAPIKey[invite.APIKey] = invite
+	return fs.flush()
+}
+
+func (fs *fileStore) FindInviteByCode(code string) (*PersistentInvite, bool, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	inv, ok := fs.byInviteCode[code]
+	return inv, ok, nil
+}
+
+func (fs *fileStore) FindInviteByID(id string) (*PersistentInvite, bool, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	inv, ok := fs.byInviteID[id]
+	return inv, ok, nil
+}
+
+func (fs *fileStore) FindInviteByAPIKey(apiKey string) (*PersistentInvite, bool, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	inv, ok := fs.byInviteAPIKey[apiKey]
+	return inv, ok, nil
+}
+
+func (fs *fileStore) RevokeInvite(id string, now time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	inv, ok := fs.byInviteID[id]
+	if !ok {
+		return errors.New("invite not found")
+	}
+	inv.RevokedAt = &now
+	return fs.flush()
+}
+
+func (fs *fileStore) ActivatePersistentPairing(invite *PersistentInvite, phone string, now time.Time) (*PairingRecord, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Disconnect any existing active record for this phone on the same WAB number.
+	for _, r := range fs.records {
+		if r.WabNumber == invite.WabNumber && r.PhoneNumber == phone && r.Status == StatusActive {
+			r.Status = StatusDisconnected
+			r.UpdatedAt = now
+		}
+	}
+
+	record := &PairingRecord{
+		ID:          uuid.NewString(),
+		InstanceID:  invite.InstanceID,
+		APIKey:      invite.APIKey,
+		PhoneNumber: phone,
+		WabNumber:   invite.WabNumber,
+		Status:      StatusActive,
+		PairingMode: ModePersistent,
+		InviteID:    invite.ID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	fs.records = append(fs.records, record)
+	fs.byPhone[phone] = record
+	fs.byAPIKey[record.APIKey] = record
 
 	return record, fs.flush()
 }

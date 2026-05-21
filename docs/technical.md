@@ -23,7 +23,7 @@ flowchart LR
     WS[WSS /ws]
     WH[/webhooks/whatsapp]
     SVC[Routing service]
-    DB[(PostgreSQL)]
+    DB[(Store: SQLite / file / memory)]
     Q[(Ephemeral queue / cache)]
   end
   subgraph meta [Meta]
@@ -44,32 +44,90 @@ flowchart LR
 
 ### 3.1 OpenClaw plugin (local)
 
-| Area | Plan |
-|------|------|
-| **Package** | npm package + `openclaw.plugin.json` per PRD §7.1; `configSchema` for base URL, optional env overrides. |
-| **Lifecycle** | On load: `registerChannel`, `ChannelMessageActionAdapter`, `registerSetupWizardStep` per §6.1. |
-| **Setup wizard** | Step flow: `POST /api/v1/pair/request` → render QR + `wa.me` URL (§5.2–5.3) → open WSS with returned instance key → wait for `PAIRING_COMPLETE` (optional `GET /api/v1/pair/status` for UX/polling fallback). |
-| **Secrets** | Store per-instance API key via OpenClaw `SecretRef`; send `Authorization: Bearer` on REST and WSS subprotocol or header (§8.2). |
-| **WebSocket client** | JSON envelope §7.5; handle `INBOUND_MESSAGE`, `PAIRING_COMPLETE`, `HEARTBEAT`, `ERROR`; exponential backoff + jitter, cap 60s (§6.1). |
-| **Outbound** | Agent reply → `POST /api/v1/send` with same Bearer; map OpenClaw message model ↔ WhatsApp payload fields expected by your server contract. |
-| **TLS** | TLS 1.2+, pin to public CAs in production; no self-signed (§8.1). |
-| **Tests** | Unit: code format, `wa.me` URL (AC-03); integration: mock server for pairing + message round-trip (AC-04, AC-06). |
+| Area | Implementation |
+|------|----------------|
+| **Package** | npm package + `openclaw.plugin.json`; `configSchema` covers `routingBaseUrl`, `instanceId`, `apiKey`, `inviteId`, `dmPolicy`, `allowFrom`, `dmDenyMessage`, `groupPolicy`, `defaultTo`. |
+| **Lifecycle** | `defineChannelPluginEntry` → `ChannelPlugin`; gateway account started via `startWhatsappOfficialGatewayAccount`. |
+| **Setup wizard** | Step flow (`onboarding.ts`): imBee intro note → routing server URL → **mode selector** (`single_use` / `persistent`) → `POST /api/v1/pair/request {mode}` → render QR + `wa.me` URL. **Single-Use:** `prompter.confirm` waits for user to confirm scan. **Persistent Invite:** displays share instructions and exits immediately — no blocking wait. Both paths write `routingBaseUrl`, `instanceId`, `apiKey` to config; persistent mode also writes `inviteId`. Security note is shown in both paths. |
+| **Config persistence** | `apiKey` and `inviteId` written directly into OpenClaw config YAML by the wizard return value. `inviteId` is used by the `DELETE /api/v1/pair/invite/{inviteId}` revoke flow. |
+| **WebSocket client** | Persistent connection in `gateway.ts` with exponential backoff + jitter (cap 60s). Handles `INBOUND_MESSAGE` → `handleWhatsappOfficialInbound`, and `PAIRING_COMPLETE` → logs `phone`, `pairingMode`, `inviteId`. Auth: `Authorization: Bearer {apiKey}`. |
+| **WS auth fallback** | Server accepts connections from both device-mapped API keys and invite-only API keys (instance with no paired phone yet). |
+| **Outbound** | Agent reply → `POST /api/v1/send {toPhoneNumber, text}` with Bearer; `sendOutboundText` / `sendOutboundMedia` in `transport.ts`. |
+| **Sender allowlist** | `inbound.ts` checks `dmPolicy === "allowlist"` before typing indicator; blocked senders receive `dmDenyMessage` reply via `sendOutboundText`, then handler returns. SDK backstop also enforced at routing layer. |
+| **TLS** | HTTPS/WSS in production; dev uses `http://localhost:28080`. |
+| **Tests** | Unit: code format, `wa.me` URL (AC-03), mode selector renders correctly (AC-16); integration: mock server for single-use pairing (AC-04, AC-06), persistent invite multi-phone (AC-18, AC-19), brute-force flows (AC-23, AC-24, AC-25). |
 
 ### 3.2 Routing server (imBee backend)
 
-| Area | Plan |
-|------|------|
-| **HTTP surface** | Implement §6.2 table: `pair/request`, `pair/status`, `send`, `webhooks/whatsapp`. |
-| **Webhook handler** | Strict order: verify `X-Hub-Signature-256` → **200 quickly** → async parse/route (§7.4, §9 Meta retries). |
-| **Pairing** | CSPRNG codes `CLAW-[A-Z0-9]{4}-[A-Z0-9]{4}`, 10m TTL, single-use; rate limit pair requests (e.g. 5/instance/hour) §8.5. |
-| **Routing** | Regex branch for pairing vs normal message; multi-row per `instance_id` for multiple phones §9. |
-| **WebSocket** | Authenticate at connect; maintain `ws_connection_id` ↔ `instance_id`; push envelopes §7.5. |
-| **Queue** | If no active WS: enqueue encrypted payload, TTL ≤ 24h, notify user on discard §8.4, §9. |
-| **Persistence** | `device_mappings` as in §7.3; **do not** persist message bodies in SQL after forward (AC-09); queue store is ephemeral/encrypted only. |
-| **Observability** | Structured logs, metrics (webhook latency, WS connected count, queue depth), tracing on critical paths. |
-| **Ops** | Secrets for Meta app secret, WABA tokens, DB creds in cloud secret manager; rotate keys. |
+| Area | Implementation |
+|------|----------------|
+| **HTTP surface** | `POST /api/v1/pair/request` (with `mode` field), `GET /api/v1/pair/status`, `GET /api/v1/pair/invite`, `DELETE /api/v1/pair/invite/{inviteId}`, `POST /api/v1/send`, `POST /api/v1/typing`, `GET /api/v1/media/{mediaId}`, `GET+POST /webhooks/whatsapp`, `GET /ws`, `GET /healthz`. |
+| **Webhook handler** | Verify HMAC-SHA256 signature (`X-Hub-Signature-256`) → respond 200 immediately → parse payload → call `routeIncoming` per message. |
+| **Pairing — Single-Use** | CSPRNG codes `CLAW-[A-Z0-9]{4}-[A-Z0-9]{4}`, TTL configured via `PAIRING_CODE_TTL_SECONDS` (default 600s); code stored in `pairing_records.pairing_code`; cleared on first use via `ActivatePairing`; rate-limited via `TrackPairRequest`. Collision retry: up to 5 attempts on store error before returning error. |
+| **Pairing — Persistent Invite** | Same code format; stored in `persistent_invites` with no expiry; code never cleared on use; revocable via `DELETE /api/v1/pair/invite/{inviteId}` which sets `revoked_at`. Same 5-retry policy on code collision. |
+| **Webhook code dispatch** | Regex check (`CLAW-[A-Z0-9]{4}-[A-Z0-9]{4}`) → global RPM check → per-phone block check → **(A) try `ActivatePairing`** (single-use path); on code-not-found → **(B) try `FindInviteByCode`** + `ActivatePersistentPairing` (persistent path). Wrong code on both branches → record attempt → potentially block phone → send WA error reply. |
+| **Brute-force prevention** | Two layers in-process (not persisted, cleared on restart): (1) **Global RPM cap** — sliding 1-minute window of code-format messages; drops silently above `BRUTE_FORCE_GLOBAL_RPM` (default 60). (2) **Per-phone block** — rolling window of wrong attempts; after `BRUTE_FORCE_MAX_ATTEMPTS` (default 5) within `BRUTE_FORCE_WINDOW_SECONDS` (default 3600), phone is blocked for `BRUTE_FORCE_BLOCK_MINUTES` (default 30); exactly one WA notification sent per block period via `bfPhoneNotified` map. Per-code counting not implemented — see PRD §8.6. |
+| **WS authentication** | Bearer token verified at connect: checks `pairing_records` first (via `recordCache` then store); falls back to `persistent_invites` (`inviteCache` then store) to support instances with no paired phone yet. |
+| **WS hub** | In-memory `ws.Hub` maps `instanceId → *websocket.Conn`; `Send` marshals JSON envelope and writes. Multiple connections per instance supported. |
+| **Send validation** | `handleSend` looks up target by **phone number** (`FindByPhone`) then verifies `record.APIKey == requestApiKey`; this supports persistent mode where multiple phones share one API key. |
+| **In-process caches** | `recordCache` (by phone + apiKey) and `inviteCache` (by code + apiKey) serve hot-path lookups without store round-trips. `inviteCache.evict` removes stale entries on revoke. |
+| **Store drivers** | Three interchangeable drivers behind `store.Repository`: `memory` (default dev, no persistence), `file` (JSON file, atomic write-rename), `sqlite` (WAL mode, default prod). Selected via `STORE_DRIVER` env var. SQLite applies `tryAddColumn` migrations for safe upgrades of existing databases. |
+| **Persistence** | `pairing_records` + `persistent_invites`; `pair_requests` for rate limiting. **No message bodies stored** (AC-09). |
+| **Observability** | Structured log lines at each routing decision point (pairing, dispatch, brute-force events), masked phone numbers in logs. |
+| **Ops** | WA provider selected via `WA_PROVIDER` (`meta`, `360dialog`, or stub). Credentials via env vars; designed for injection via cloud secret manager. |
 
-### 3.3 Meta integration
+### 3.3 Persistent Invite — detailed data flow
+
+```
+Plugin wizard (onboarding.ts)
+  POST /api/v1/pair/request { mode: "persistent" }
+    → pairing.Service.CreatePersistentInvite(clientIP)
+      → rate-limit check (TrackPairRequest)
+      → generate api_key + code (up to 5 retries on collision)
+      → store.CreateInvite(invite)
+    → returns { mode, apiKey, pairingCode, inviteId, waMeUrl, wabNumber }
+  Wizard renders QR + displays share instructions
+  Wizard exits immediately (no prompter.confirm wait)
+  Plugin writes apiKey + inviteId to OpenClaw config
+
+Gateway starts (gateway.ts)
+  WebSocket connects to /ws with Bearer apiKey
+    → server checks pairing_records (none yet)
+    → fallback: server checks persistent_invites → match → instanceId resolved
+  Connection registered in ws.Hub[instanceId]
+
+Phone A sends "CLAW-A3F9-Z7KL" to shared WA number
+  Webhook arrives → routeIncoming(msg)
+    → code matches regex
+    → global RPM check passes
+    → per-phone block check passes
+    → ActivatePairing(code) → "pairing code not found" (it's an invite code)
+    → FindInviteByCode(code) → invite found (revoked_at IS NULL)
+    → ActivatePersistentPairing(invite, phoneA, now)
+        → evict existing active record for phoneA on same wab_number
+        → INSERT pairing_records { phone_number=A, pairing_mode="persistent", invite_id }
+    → send WA confirmation to Phone A
+    → ws.Hub.Send(instanceId, PAIRING_COMPLETE { phoneNumber: A, pairingMode: "persistent", inviteId })
+
+Phone B sends same code
+  → same flow → new pairing_records row for Phone B (phoneA record unchanged)
+  → PAIRING_COMPLETE fires again with phoneNumber: B
+
+Revoke:
+  DELETE /api/v1/pair/invite/{inviteId}  (Authorization: Bearer apiKey)
+    → verify invite.APIKey == requestApiKey
+    → store.RevokeInvite(inviteId, now)  →  UPDATE persistent_invites SET revoked_at = now()
+    → inviteCache.evict(inviteId)
+    → existing pairing_records rows remain ACTIVE (phones keep their connection)
+    → future code sends no longer match (FindInviteByCode filters WHERE revoked_at IS NULL)
+
+Note: existing paired phones are not disconnected on invite revoke; they remain active until
+they re-pair or the instance operator manually manages them. This is intentional for v1 — a
+future "revoke and disconnect all" endpoint can set pairing_records.status = DISCONNECTED
+WHERE invite_id = inviteId and call ws.Hub.Disconnect(instanceId) for a hard cutoff.
+```
+
+### 3.4 Meta integration
 
 - Register app webhook URL → imBee `POST /webhooks/whatsapp`.
 - Outbound: Cloud API sends using imBee's phone number ID / tokens (server-only).
@@ -79,22 +137,31 @@ flowchart LR
 
 ## 4. Phased delivery
 
-| Phase | Outcome |
-|-------|---------|
-| **P0 – Contracts** | OpenAPI (or shared TS types) for REST + WSS message shapes; error codes for wizard. |
-| **P1 – Routing MVP** | Webhook verify + parse + pairing path + DB + minimal `send` + WSS notify pairing complete. |
-| **P2 – Plugin MVP** | Wizard + WSS + channel adapter calling mock then real server. |
-| **P3 – Runtime** | Full inbound forward, outbound `send`, reconnect policy, dedupe. |
-| **P4 – Resilience** | 24h queue, DISCONNECTED state, user-visible "missed messages" path §9. |
-| **P5 – Hardening** | Rate limits, security review (AC-07, AC-09), load test AC-05. |
+| Phase | Outcome | Status |
+|-------|---------|--------|
+| **P0 – Contracts** | OpenAPI (or shared TS types) for REST + WSS message shapes; error codes for wizard; `mode` field and `persistent_invites` schema. | ✅ Done |
+| **P1 – Routing MVP** | Webhook verify + parse + single-use pairing path + DB + minimal `send` + WSS `PAIRING_COMPLETE`. | ✅ Done |
+| **P2 – Plugin MVP** | Wizard with mode selector + WSS + channel adapter calling mock then real server. | ✅ Done |
+| **P3 – Persistent Invite** | `persistent_invites` table; `POST /api/v1/pair/request {mode}` two-branch dispatch; `GET`/`DELETE /api/v1/pair/invite`; extended `PAIRING_COMPLETE`; invite cache; WS auth fallback; wizard exits immediately for persistent mode; `inviteId` written to config. | ✅ Done |
+| **P4 – Brute-Force & Sender Filtering** | Per-phone block + global RPM cap (in-process); `dmPolicy: allowlist` enforcement with `dmDenyMessage` reply in plugin; security note in wizard and README. | ✅ Done |
+| **P5 – Resilience** | 24h queue, DISCONNECTED state, user-visible "missed messages" path. | ⬜ Planned |
+| **P6 – Hardening** | Security review (AC-07, AC-09, AC-20, AC-21); load test AC-05; move brute-force counters to persistent store for crash-safety; "revoke and disconnect all" endpoint; Media forwarding hardening. | ⬜ Planned |
 
 ---
 
 ## 5. Suggested implementation stacks (both clouds)
 
-**Application runtime:** Node.js or Go (strong WS + JSON ecosystem); single service binary or small modular services if you split webhook vs WS later.
+**Application runtime:** Go — single binary, low memory per goroutine, strong WS + JSON ecosystem.
 
-**Database:** PostgreSQL (RDS / Azure Database for PostgreSQL Flexible Server) — fits UUID, enums, uniqueness on `phone_number` / `pairing_code`.
+**Database:** Three interchangeable store drivers behind `store.Repository`:
+
+| Driver | Use case | Selected via |
+|--------|----------|--------------|
+| `memory` | Unit tests, ephemeral dev | `STORE_DRIVER=memory` |
+| `file` | Single-process dev with persistence | `STORE_DRIVER=file` |
+| `sqlite` | Default production (no external DB required) | `STORE_DRIVER=sqlite` (default) |
+
+For multi-instance production scale, replace with **PostgreSQL** (RDS / Azure Database for PostgreSQL Flexible Server) — the `store.Repository` interface makes this a new driver addition, not a refactor.
 
 **Queue / ephemeral store:**
 - AWS: SQS (visibility + DLQ) or Redis (ElastiCache) for short TTL semantics you control.

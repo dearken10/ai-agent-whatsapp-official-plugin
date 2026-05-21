@@ -19,19 +19,28 @@ export function resolveAccountFromCfg(
   const allowFrom = Array.isArray(section.allowFrom)
     ? section.allowFrom.filter((item): item is string => typeof item === "string")
     : [];
+  const dmDenyMessage =
+    typeof section.dmDenyMessage === "string" && section.dmDenyMessage.trim().length > 0
+      ? section.dmDenyMessage.trim()
+      : "You are not authorised to use this service. Please contact the service owner for access.";
   const defaultTo = typeof section.defaultTo === "string" ? section.defaultTo : undefined;
   const dmPolicy = typeof section.dmPolicy === "string" ? section.dmPolicy : "open";
   const groupPolicy =
     section.groupPolicy === "open" || section.groupPolicy === "disabled" || section.groupPolicy === "allowlist"
       ? section.groupPolicy
       : "disabled";
+  const inviteId = typeof section.inviteId === "string" && section.inviteId.trim().length > 0
+    ? section.inviteId.trim()
+    : undefined;
   return {
     accountId: accountId ?? "default",
     configured: Boolean(routingBaseUrl && instanceId && apiKey),
     routingBaseUrl,
     instanceId,
     apiKey,
+    inviteId,
     allowFrom,
+    dmDenyMessage,
     defaultTo,
     dmPolicy,
     groupPolicy,
@@ -40,22 +49,49 @@ export function resolveAccountFromCfg(
 
 export async function requestPairingCode(
   baseUrl: string,
-): Promise<{ instanceId: string; pairingCode: string; expiresAt: string; waMeUrl: string; apiKey: string }> {
+  mode: "single_use" | "persistent" = "single_use",
+): Promise<{
+  mode: string;
+  instanceId: string;
+  pairingCode: string;
+  waMeUrl: string;
+  apiKey: string;
+  /** Defined only for single_use mode */
+  expiresAt?: string;
+  /** Defined only for persistent mode */
+  inviteId?: string;
+}> {
   const response = await fetch(`${baseUrl}/api/v1/pair/request`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    body: JSON.stringify({ mode }),
   });
   if (!response.ok) {
     throw new Error(`pair request failed: ${response.status}`);
   }
   return response.json() as Promise<{
+    mode: string;
     instanceId: string;
     pairingCode: string;
-    expiresAt: string;
     waMeUrl: string;
     apiKey: string;
+    expiresAt?: string;
+    inviteId?: string;
   }>;
+}
+
+export async function revokePersistentInvite(
+  baseUrl: string,
+  apiKey: string,
+  inviteId: string,
+): Promise<void> {
+  const response = await fetch(`${baseUrl}/api/v1/pair/invite/${encodeURIComponent(inviteId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) {
+    throw new Error(`revoke invite failed: ${response.status}`);
+  }
 }
 
 export async function sendTypingIndicator(params: {

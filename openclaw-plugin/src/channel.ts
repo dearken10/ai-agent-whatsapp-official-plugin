@@ -47,12 +47,13 @@ export const whatsappOfficialPlugin: ChannelPlugin<ResolvedWhatsappOfficialAccou
   configSchema: {
     schema: {
       type: "object",
-      additionalProperties: false,
       properties: {
         routingBaseUrl: { type: "string", default: "https://openclaw-plugin.dev.ent.imbee.io" },
         instanceId: { type: "string" },
         apiKey: { type: "string" },
+        inviteId: { type: "string" },
         allowFrom: { type: "array", items: { type: "string" } },
+        dmDenyMessage: { type: "string" },
         defaultTo: { type: "string" },
         dmPolicy: {
           type: "string",

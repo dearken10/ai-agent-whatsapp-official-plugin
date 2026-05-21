@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Memory
+
+Project-scoped memory lives in `.claude/memory/`. Read `MEMORY.md` there at the start of each session for carry-over context (feedback, env config, infra access notes).
+
 ## What This Repo Is
 
 An MVP for connecting WhatsApp Cloud API (via imBee routing) to an AI agent. The backend is agent-agnostic; one or more plugins consume the same WS + HTTP contract.

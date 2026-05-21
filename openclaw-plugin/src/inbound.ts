@@ -77,6 +77,26 @@ export async function handleWhatsappOfficialInbound(params: {
     return;
   }
 
+  // Allowlist enforcement — reply and exit before touching the agent runtime.
+  // The OpenClaw SDK also enforces dmPolicy at the routing layer, but it silently
+  // drops blocked messages without any reply. We handle it here first so the sender
+  // gets a human-readable response.
+  if (account.dmPolicy === "allowlist") {
+    const normalizedFrom = from.replace(/^whatsapp:/i, "").trim();
+    const allowed = account.allowFrom.some(
+      (e) => e.replace(/^whatsapp:/i, "").trim() === normalizedFrom,
+    );
+    if (!allowed) {
+      await sendOutboundText({
+        cfg,
+        accountId: account.accountId,
+        to: from,
+        text: account.dmDenyMessage,
+      }).catch(() => {/* best-effort — don't fail the webhook handler over a reply */});
+      return;
+    }
+  }
+
   // Fire-and-forget: mark message as read and show typing indicator
   sendTypingIndicator({ cfg, accountId: account.accountId, messageId }).catch(() => {/* best-effort */});
 

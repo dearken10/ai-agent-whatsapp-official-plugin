@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -28,8 +29,16 @@ type Server struct {
 	pairingSvc *pairing.Service
 	hub        *ws.Hub
 	cache      *recordCache
+	invites    *inviteCache
 	waProvider whatsapp.Provider
 	upgrader   websocket.Upgrader
+
+	// Brute-force protection state (all guarded by bfMu)
+	bfMu            sync.Mutex
+	bfPhoneAttempts map[string][]time.Time // phone → wrong attempt timestamps within window
+	bfPhoneBlocked  map[string]time.Time   // phone → unblock time
+	bfPhoneNotified map[string]bool        // phone → notification sent for current block period
+	bfGlobalEvents  []time.Time            // global code-format message timestamps (last minute)
 }
 
 func NewServer(cfg config.Config) (*Server, error) {
@@ -50,12 +59,12 @@ func NewServer(cfg config.Config) (*Server, error) {
 	}
 
 	waProvider, err := whatsapp.New(whatsapp.Config{
-		Provider:         cfg.WAProvider,
-		WABAToken:        cfg.WABAToken,
+		Provider:          cfg.WAProvider,
+		WABAToken:         cfg.WABAToken,
 		WABAPhoneNumberID: cfg.WABAPhoneNumberID,
-		WebhookAppSecret: cfg.WebhookAppSecret,
-		D360APIKey:       cfg.D360APIKey,
-		D360BaseURL:      cfg.D360BaseURL,
+		WebhookAppSecret:  cfg.WebhookAppSecret,
+		D360APIKey:        cfg.D360APIKey,
+		D360BaseURL:       cfg.D360BaseURL,
 	})
 	if err != nil {
 		return nil, err
@@ -77,15 +86,19 @@ func NewServer(cfg config.Config) (*Server, error) {
 		provider, cfg.SharedNumber, keyHint)
 
 	return &Server{
-		cfg:        cfg,
-		store:      st,
-		pairingSvc: pairing.NewService(cfg, st),
-		hub:        ws.NewHub(),
-		cache:      newRecordCache(),
-		waProvider: waProvider,
+		cfg:             cfg,
+		store:           st,
+		pairingSvc:      pairing.NewService(cfg, st),
+		hub:             ws.NewHub(),
+		cache:           newRecordCache(),
+		invites:         newInviteCache(),
+		waProvider:      waProvider,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		bfPhoneAttempts: make(map[string][]time.Time),
+		bfPhoneBlocked:  make(map[string]time.Time),
+		bfPhoneNotified: make(map[string]bool),
 	}, nil
 }
 
@@ -93,6 +106,8 @@ func (s *Server) Router() *mux.Router {
 	r := mux.NewRouter()
 	r.HandleFunc("/healthz", s.handleHealth).Methods(http.MethodGet)
 	r.HandleFunc("/api/v1/pair/request", s.handlePairRequest).Methods(http.MethodPost)
+	r.HandleFunc("/api/v1/pair/invite", s.handleInviteGet).Methods(http.MethodGet)
+	r.HandleFunc("/api/v1/pair/invite/{inviteId}", s.handleInviteDelete).Methods(http.MethodDelete)
 	r.HandleFunc("/api/v1/pair/status", s.handlePairStatus).Methods(http.MethodGet)
 	r.HandleFunc("/api/v1/send", s.handleSend).Methods(http.MethodPost)
 	r.HandleFunc("/api/v1/typing", s.handleTyping).Methods(http.MethodPost)
@@ -115,12 +130,43 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
-	record, err := s.pairingSvc.CreatePairing(clientIP(r))
+	var req struct {
+		Mode string `json:"mode"` // "single_use" (default) or "persistent"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Empty body is fine — treat as single_use default.
+		req.Mode = ""
+	}
+
+	ip := clientIP(r)
+
+	if req.Mode == "persistent" {
+		invite, err := s.pairingSvc.CreatePersistentInvite(ip)
+		if err != nil {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+			return
+		}
+		s.invites.set(invite)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"mode":       "persistent",
+			"inviteId":   invite.ID,
+			"instanceId": invite.InstanceID,
+			"pairingCode": invite.Code,
+			"waMeUrl":    pairing.WaMeURL(s.cfg.SharedNumber, invite.Code),
+			"apiKey":     invite.APIKey,
+			"wabNumber":  invite.WabNumber,
+		})
+		return
+	}
+
+	// Default: single-use
+	record, err := s.pairingSvc.CreatePairing(ip)
 	if err != nil {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"mode":        "single_use",
 		"instanceId":  record.InstanceID,
 		"pairingCode": record.PairingCode,
 		"expiresAt":   record.ExpiresAt.Format(time.RFC3339),
@@ -128,6 +174,69 @@ func (s *Server) handlePairRequest(w http.ResponseWriter, r *http.Request) {
 		"apiKey":      record.APIKey,
 		"wabNumber":   record.WabNumber,
 	})
+}
+
+// handleInviteGet returns the active persistent invite for the authenticated instance.
+func (s *Server) handleInviteGet(w http.ResponseWriter, r *http.Request) {
+	apiKey := bearerToken(r.Header.Get("Authorization"))
+	if apiKey == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		return
+	}
+	inv, ok := s.invites.getByAPIKey(apiKey)
+	if !ok {
+		var err error
+		inv, ok, err = s.store.FindInviteByAPIKey(apiKey)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
+			return
+		}
+		if ok {
+			s.invites.set(inv)
+		}
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no active invite found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"inviteId":    inv.ID,
+		"instanceId":  inv.InstanceID,
+		"pairingCode": inv.Code,
+		"waMeUrl":     pairing.WaMeURL(s.cfg.SharedNumber, inv.Code),
+		"wabNumber":   inv.WabNumber,
+		"createdAt":   inv.CreatedAt.Format(time.RFC3339),
+	})
+}
+
+// handleInviteDelete revokes a persistent invite by ID.
+func (s *Server) handleInviteDelete(w http.ResponseWriter, r *http.Request) {
+	apiKey := bearerToken(r.Header.Get("Authorization"))
+	if apiKey == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		return
+	}
+	inviteID := mux.Vars(r)["inviteId"]
+	// Verify ownership: the invite's API key must match the request's bearer token.
+	inv, ok, err := s.store.FindInviteByID(inviteID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "invite not found"})
+		return
+	}
+	if inv.APIKey != apiKey {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "not authorized to revoke this invite"})
+		return
+	}
+	if err = s.store.RevokeInvite(inviteID, time.Now().UTC()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "revoke failed: " + err.Error()})
+		return
+	}
+	s.invites.evict(inviteID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
 func (s *Server) handlePairStatus(w http.ResponseWriter, r *http.Request) {
@@ -164,22 +273,6 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
 		return
 	}
-	record, ok := s.cache.getByAPIKey(apiKey)
-	if !ok {
-		var err error
-		record, ok, err = s.store.FindByAPIKey(apiKey)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
-			return
-		}
-		if ok {
-			s.cache.set(record)
-		}
-	}
-	if !ok || record.Status != store.StatusActive {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "inactive or invalid token"})
-		return
-	}
 	var req struct {
 		ToPhoneNumber string `json:"toPhoneNumber"`
 		Text          string `json:"text"`
@@ -196,10 +289,31 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text or mediaUrl is required"})
 		return
 	}
-	if req.ToPhoneNumber != record.PhoneNumber {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target mismatch: can only send to paired number"})
+
+	// Validate that the target phone is actively paired via this API key.
+	// For persistent mode, multiple phones share the same API key, so we look
+	// up by phone number and verify the API key matches rather than the reverse.
+	targetRecord, ok := s.cache.getByPhone(req.ToPhoneNumber)
+	if !ok {
+		var err error
+		targetRecord, ok, err = s.store.FindByPhone(req.ToPhoneNumber)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
+			return
+		}
+		if ok {
+			s.cache.set(targetRecord)
+		}
+	}
+	if !ok || targetRecord.Status != store.StatusActive {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target not paired or inactive"})
 		return
 	}
+	if targetRecord.APIKey != apiKey {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target mismatch: phone not paired to this instance"})
+		return
+	}
+
 	var (
 		messageID string
 		sendErr   error
@@ -229,19 +343,7 @@ func (s *Server) handleTyping(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
 		return
 	}
-	record, ok := s.cache.getByAPIKey(apiKey)
-	if !ok {
-		var err error
-		record, ok, err = s.store.FindByAPIKey(apiKey)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
-			return
-		}
-		if ok {
-			s.cache.set(record)
-		}
-	}
-	if !ok || record.Status != store.StatusActive {
+	if !s.isValidAPIKey(apiKey) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "inactive or invalid token"})
 		return
 	}
@@ -262,16 +364,7 @@ func (s *Server) handleMediaDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
 		return
 	}
-	_, ok := s.cache.getByAPIKey(apiKey)
-	if !ok {
-		var err error
-		_, ok, err = s.store.FindByAPIKey(apiKey)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
-			return
-		}
-	}
-	if !ok {
+	if !s.isValidAPIKey(apiKey) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 		return
 	}
@@ -292,7 +385,6 @@ func (s *Server) handleMediaDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebhookVerify responds to Meta's GET challenge when registering the webhook URL.
-// Meta sends hub.mode=subscribe, hub.verify_token, and hub.challenge; we echo the challenge back.
 func (s *Server) handleWebhookVerify(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Get("hub.mode") != "subscribe" {
@@ -343,6 +435,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing bearer token", http.StatusUnauthorized)
 		return
 	}
+
+	// Resolve the instance ID from either a paired device record or a persistent invite.
+	var instanceID string
+
 	record, ok := s.cache.getByAPIKey(apiKey)
 	if !ok {
 		var err error
@@ -355,20 +451,40 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			s.cache.set(record)
 		}
 	}
-	if !ok {
-		log.Printf("[ws] rejected connection: invalid token (key=%.8s…)", apiKey)
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
+	if ok {
+		instanceID = record.InstanceID
+	} else {
+		// Fallback: the API key may belong to a persistent invite where no phone
+		// has paired yet (no device_mappings row exists).
+		inv, invOk := s.invites.getByAPIKey(apiKey)
+		if !invOk {
+			var err error
+			inv, invOk, err = s.store.FindInviteByAPIKey(apiKey)
+			if err != nil {
+				http.Error(w, "store error", http.StatusInternalServerError)
+				return
+			}
+			if invOk {
+				s.invites.set(inv)
+			}
+		}
+		if !invOk {
+			log.Printf("[ws] rejected connection: invalid token (key=%.8s…)", apiKey)
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		instanceID = inv.InstanceID
 	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	log.Printf("[ws] client connected instance=%s status=%s", record.InstanceID, record.Status)
-	s.hub.Register(record.InstanceID, conn)
+	log.Printf("[ws] client connected instance=%s", instanceID)
+	s.hub.Register(instanceID, conn)
 	defer func() {
-		log.Printf("[ws] client disconnected instance=%s", record.InstanceID)
-		s.hub.Remove(record.InstanceID, conn)
+		log.Printf("[ws] client disconnected instance=%s", instanceID)
+		s.hub.Remove(instanceID, conn)
 		_ = conn.Close()
 	}()
 	for {
@@ -392,24 +508,80 @@ func (s *Server) routeIncoming(msg webhook.MetaWebhookMessage) {
 	// Pairing codes always arrive as plain text.
 	if pairingCodeRegex.MatchString(msg.Text.Body) {
 		log.Printf("[route] pairing code detected from=%s", maskPhone(from))
+
+		// Layer 2: global RPM circuit breaker — drop if too many code-format messages.
+		if s.bruteForceGlobalDrop(now) {
+			log.Printf("[route] brute-force global RPM exceeded, dropping code from=%s", maskPhone(from))
+			return
+		}
+
+		// Layer 1: per-phone block check.
+		if s.bruteForcePhoneBlocked(from, now) {
+			log.Printf("[route] brute-force phone blocked from=%s", maskPhone(from))
+			return
+		}
+
+		// Branch A: try single-use pairing.
 		record, err := s.store.ActivatePairing(msg.Text.Body, from, now)
-		if err != nil {
-			log.Printf("[route] ActivatePairing error: %v", err)
+		if err == nil {
+			s.cache.set(record)
+			log.Printf("[route] single-use pairing activated instance=%s phone=%s", record.InstanceID, maskPhone(record.PhoneNumber))
+			_ = s.hub.Send(record.InstanceID, "PAIRING_COMPLETE", messageID, map[string]string{
+				"instanceId":  record.InstanceID,
+				"phoneNumber": record.PhoneNumber,
+				"pairingMode": string(store.ModeSingleUse),
+			})
 			if _, sendErr := s.waProvider.SendText(context.Background(), from,
-				"❌ Invalid or expired pairing code. Please request a new code from your OpenClaw setup wizard and try again."); sendErr != nil {
-				log.Printf("[route] invalid code reply error: %v", sendErr)
+				"✅ Pairing complete! Your OpenClaw AI agent is now connected to this WhatsApp number."); sendErr != nil {
+				log.Printf("[route] pairing confirm send error: %v", sendErr)
 			}
 			return
 		}
-		s.cache.set(record)
-		log.Printf("[route] pairing activated instance=%s phone=%s", record.InstanceID, maskPhone(record.PhoneNumber))
-		_ = s.hub.Send(record.InstanceID, "PAIRING_COMPLETE", messageID, map[string]string{
-			"instanceId":  record.InstanceID,
-			"phoneNumber": record.PhoneNumber,
-		})
-		// Confirm to the user via WhatsApp
-		if _, sendErr := s.waProvider.SendText(context.Background(), from, "✅ Pairing complete! Your OpenClaw AI agent is now connected to this WhatsApp number."); sendErr != nil {
-			log.Printf("[route] pairing confirm send error: %v", sendErr)
+
+		// Branch B: try persistent invite pairing.
+		inv, invOk := s.invites.getByCode(msg.Text.Body)
+		if !invOk {
+			var storeErr error
+			inv, invOk, storeErr = s.store.FindInviteByCode(msg.Text.Body)
+			if storeErr != nil {
+				log.Printf("[route] FindInviteByCode error: %v", storeErr)
+			}
+			if invOk {
+				s.invites.set(inv)
+			}
+		}
+		if invOk && inv.RevokedAt == nil {
+			pairRecord, pairErr := s.store.ActivatePersistentPairing(inv, from, now)
+			if pairErr != nil {
+				log.Printf("[route] ActivatePersistentPairing error: %v", pairErr)
+				if _, sendErr := s.waProvider.SendText(context.Background(), from,
+					"❌ Pairing failed. Please try again."); sendErr != nil {
+					log.Printf("[route] error reply send error: %v", sendErr)
+				}
+				return
+			}
+			s.cache.set(pairRecord)
+			log.Printf("[route] persistent pairing activated instance=%s phone=%s invite=%s",
+				pairRecord.InstanceID, maskPhone(pairRecord.PhoneNumber), inv.ID)
+			_ = s.hub.Send(pairRecord.InstanceID, "PAIRING_COMPLETE", messageID, map[string]string{
+				"instanceId":  pairRecord.InstanceID,
+				"phoneNumber": pairRecord.PhoneNumber,
+				"pairingMode": string(store.ModePersistent),
+				"inviteId":    inv.ID,
+			})
+			if _, sendErr := s.waProvider.SendText(context.Background(), from,
+				"✅ Pairing complete! Your OpenClaw AI agent is now connected to this WhatsApp number."); sendErr != nil {
+				log.Printf("[route] pairing confirm send error: %v", sendErr)
+			}
+			return
+		}
+
+		// Code matched neither branch — wrong/expired code.
+		s.bruteForceRecordWrong(from, now)
+		log.Printf("[route] invalid code from=%s err=%v", maskPhone(from), err)
+		if _, sendErr := s.waProvider.SendText(context.Background(), from,
+			"❌ Invalid or expired pairing code. Please request a new code from your OpenClaw setup wizard and try again."); sendErr != nil {
+			log.Printf("[route] invalid code reply error: %v", sendErr)
 		}
 		return
 	}
@@ -493,6 +665,104 @@ func (s *Server) routeIncoming(msg webhook.MetaWebhookMessage) {
 	_ = s.hub.Send(record.InstanceID, "INBOUND_MESSAGE", messageID, payload)
 }
 
+// --- Brute-force helpers ---
+
+// bruteForceGlobalDrop returns true and records the event if the global
+// code-format message rate exceeds BruteForceGlobalRPM.
+func (s *Server) bruteForceGlobalDrop(now time.Time) bool {
+	s.bfMu.Lock()
+	defer s.bfMu.Unlock()
+	oneMinuteAgo := now.Add(-time.Minute)
+	recent := make([]time.Time, 0, len(s.bfGlobalEvents)+1)
+	for _, t := range s.bfGlobalEvents {
+		if t.After(oneMinuteAgo) {
+			recent = append(recent, t)
+		}
+	}
+	recent = append(recent, now)
+	s.bfGlobalEvents = recent
+	return len(recent) > s.cfg.BruteForceGlobalRPM
+}
+
+// bruteForcePhoneBlocked returns true if the phone is currently blocked.
+func (s *Server) bruteForcePhoneBlocked(phone string, now time.Time) bool {
+	s.bfMu.Lock()
+	defer s.bfMu.Unlock()
+	if unblock, blocked := s.bfPhoneBlocked[phone]; blocked {
+		if now.Before(unblock) {
+			return true
+		}
+		// Block expired — clear state.
+		delete(s.bfPhoneBlocked, phone)
+		delete(s.bfPhoneAttempts, phone)
+		delete(s.bfPhoneNotified, phone)
+	}
+	return false
+}
+
+// bruteForceRecordWrong records a wrong attempt for the phone. If the attempt
+// count within the configured window reaches BruteForceMaxAttempts, the phone
+// is blocked and a single WA notification is sent.
+func (s *Server) bruteForceRecordWrong(phone string, now time.Time) {
+	s.bfMu.Lock()
+
+	window := time.Duration(s.cfg.BruteForceWindowSeconds) * time.Second
+	cutoff := now.Add(-window)
+	events := s.bfPhoneAttempts[phone]
+	recent := make([]time.Time, 0, len(events)+1)
+	for _, t := range events {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	recent = append(recent, now)
+	s.bfPhoneAttempts[phone] = recent
+
+	shouldBlock := len(recent) >= s.cfg.BruteForceMaxAttempts
+	alreadyNotified := s.bfPhoneNotified[phone]
+	blockDuration := time.Duration(s.cfg.BruteForceBlockMinutes) * time.Minute
+	if shouldBlock {
+		s.bfPhoneBlocked[phone] = now.Add(blockDuration)
+		s.bfPhoneAttempts[phone] = nil // reset; will re-accumulate after unblock
+	}
+	s.bfMu.Unlock()
+
+	if shouldBlock && !alreadyNotified {
+		s.bfMu.Lock()
+		s.bfPhoneNotified[phone] = true
+		s.bfMu.Unlock()
+		msg := "⚠️ Too many invalid pairing code attempts. For security, this number has been temporarily blocked. Please try again in " +
+			blockDuration.String() + "."
+		if _, sendErr := s.waProvider.SendText(context.Background(), phone, msg); sendErr != nil {
+			log.Printf("[brute-force] notification send error phone=%s err=%v", maskPhone(phone), sendErr)
+		}
+	}
+}
+
+// --- Helpers ---
+
+// isValidAPIKey checks whether the API key belongs to any active device record
+// or any active persistent invite. Used by handlers that only need auth, not routing.
+func (s *Server) isValidAPIKey(apiKey string) bool {
+	if _, ok := s.cache.getByAPIKey(apiKey); ok {
+		return true
+	}
+	r, ok, err := s.store.FindByAPIKey(apiKey)
+	if err == nil && ok {
+		s.cache.set(r)
+		return r.Status == store.StatusActive
+	}
+	// Fallback: check persistent invites (instance may not have any paired phones yet).
+	if _, ok2 := s.invites.getByAPIKey(apiKey); ok2 {
+		return true
+	}
+	inv, invOk, invErr := s.store.FindInviteByAPIKey(apiKey)
+	if invErr == nil && invOk {
+		s.invites.set(inv)
+		return true
+	}
+	return false
+}
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -513,13 +783,11 @@ func maskPhone(phone string) string {
 // over the TCP remote address (which would be the proxy's IP in production).
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For may be a comma-separated list; take the first entry.
 		if i := strings.Index(xff, ","); i != -1 {
 			return strings.TrimSpace(xff[:i])
 		}
 		return strings.TrimSpace(xff)
 	}
-	// Fall back to RemoteAddr, stripping the port.
 	ip := r.RemoteAddr
 	if i := strings.LastIndex(ip, ":"); i != -1 {
 		ip = ip[:i]

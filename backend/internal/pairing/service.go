@@ -59,6 +59,48 @@ func (s *Service) CreatePairing(clientIP string) (*store.PairingRecord, error) {
 	return record, nil
 }
 
+// CreatePersistentInvite issues a new reusable pairing invite for the instance.
+// The same invite code can be used by any number of phones to pair to the instance.
+// The code never expires until explicitly revoked via RevokeInvite.
+func (s *Service) CreatePersistentInvite(clientIP string) (*store.PersistentInvite, error) {
+	now := time.Now().UTC()
+	allowed, err := s.store.TrackPairRequest(clientIP, now, s.cfg.PairRequestPerHour)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	instanceID := uuid.NewString()
+	apiKey, err := generateAPIKey()
+	if err != nil {
+		return nil, err
+	}
+
+	const maxRetries = 5
+	var invite *store.PersistentInvite
+	for i := range maxRetries {
+		_ = i
+		code, codeErr := generateCode()
+		if codeErr != nil {
+			return nil, codeErr
+		}
+		invite = &store.PersistentInvite{
+			ID:         uuid.NewString(),
+			InstanceID: instanceID,
+			APIKey:     apiKey,
+			Code:       code,
+			WabNumber:  s.cfg.SharedNumber,
+			CreatedAt:  now,
+		}
+		if storeErr := s.store.CreateInvite(invite); storeErr == nil {
+			return invite, nil
+		}
+	}
+	return nil, fmt.Errorf("failed to generate unique invite code after %d attempts", maxRetries)
+}
+
 func WaMeURL(sharedNumber string, pairingCode string) string {
 	return fmt.Sprintf("https://wa.me/%s?text=%s", strings.TrimPrefix(sharedNumber, "+"), pairingCode)
 }

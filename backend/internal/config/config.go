@@ -16,6 +16,12 @@ type Config struct {
 	PairingCodeTTL     time.Duration
 	PairRequestPerHour int
 
+	// Brute-force protection
+	BruteForceMaxAttempts  int           // wrong code attempts before block (per phone)
+	BruteForceBlockMinutes int           // block duration in minutes
+	BruteForceWindowSeconds int          // sliding window for attempt counting (seconds)
+	BruteForceGlobalRPM    int           // max code-format messages per minute (global)
+
 	// WhatsApp provider selection and credentials.
 	// WAProvider selects the outbound delivery backend:
 	//   "meta"      — Meta WhatsApp Cloud API (requires WABAToken + WABAPhoneNumberID)
@@ -38,6 +44,10 @@ func Load() Config {
 		WebhookVerifyToken: getenv("WEBHOOK_VERIFY_TOKEN", ""),
 		PairingCodeTTL:     time.Duration(getint("PAIRING_CODE_TTL_SECONDS", 600)) * time.Second,
 		PairRequestPerHour: getint("PAIR_RATE_LIMIT_PER_HOUR", 5),
+		BruteForceMaxAttempts:   getint("BRUTE_FORCE_MAX_ATTEMPTS", 5),
+		BruteForceBlockMinutes:  getint("BRUTE_FORCE_BLOCK_MINUTES", 30),
+		BruteForceWindowSeconds: getint("BRUTE_FORCE_WINDOW_SECONDS", 3600),
+		BruteForceGlobalRPM:     getint("BRUTE_FORCE_GLOBAL_RPM", 60),
 		WAProvider:         getenv("WA_PROVIDER", ""),
 		WABAToken:          getenv("WABA_TOKEN", ""),
 		WABAPhoneNumberID:  getenv("WABA_PHONE_NUMBER_ID", ""),
