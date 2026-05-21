@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Official WhatsApp API Channel Config",
+  "type": "object",
+  "properties": {
+    "routingBaseUrl": {
+      "type": "string",
+      "description": "Routing server base URL",
+      "default": "https://openclaw-plugin.dev.ent.imbee.io"
+    },
+    "instanceId": {
+      "type": "string",
+      "description": "Unique OpenClaw instance identifier"
+    },
+    "apiKey": {
+      "type": "string",
+      "description": "Bearer token returned by POST /api/v1/pair/request (store via OpenClaw secrets when available)"
+    },
+    "inviteId": {
+      "type": "string",
+      "description": "Persistent invite ID returned when pairing mode is 'persistent'. Used to revoke the invite later."
+    },
+    "allowFrom": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "E.164 allowlist for inbound WhatsApp senders"
+    },
+    "dmDenyMessage": {
+      "type": "string",
+      "description": "Reply sent to senders blocked by dmPolicy: allowlist. Defaults to a generic 'not authorised' message if omitted."
+    },
+    "defaultTo": {
+      "type": "string",
+      "description": "Optional default outbound peer (E.164)"
+    },
+    "dmPolicy": {
+      "type": "string",
+      "enum": ["open", "pairing", "allowlist", "disabled"],
+      "default": "open"
+    },
+    "groupPolicy": {
+      "type": "string",
+      "enum": ["open", "disabled", "allowlist"],
+      "default": "disabled"
+    }
+  },
+  "required": []
+}

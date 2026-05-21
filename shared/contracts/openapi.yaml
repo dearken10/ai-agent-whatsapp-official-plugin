@@ -1,0 +1,41 @@
+openapi: 3.0.3
+info:
+  title: imBee WhatsApp Routing API
+  version: 0.1.0
+servers:
+  - url: http://localhost:28080
+paths:
+  /api/v1/pair/request:
+    post:
+      summary: Request a pairing code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                instanceId:
+                  type: string
+              required: [instanceId]
+      responses:
+        "200":
+          description: Pairing details
+  /api/v1/pair/status:
+    get:
+      summary: Get pairing status
+      responses:
+        "200":
+          description: Pairing status
+  /api/v1/send:
+    post:
+      summary: Send outbound message
+      responses:
+        "200":
+          description: Accepted
+  /webhooks/whatsapp:
+    post:
+      summary: Meta webhook endpoint
+      responses:
+        "200":
+          description: Ack

@@ -1,0 +1,64 @@
+Copyright (c) 2026 imBee Limited. All rights reserved.
+
+SOURCE AVAILABLE LICENCE
+
+1. Definitions
+
+   "Software" means the openclaw-channel-whatsapp-official plugin and
+   all associated source code, documentation, and configuration files
+   in this repository.
+
+   "imBee Routing Service" means the routing infrastructure operated
+   by imBee Limited, including but not limited to the endpoint at
+   openclaw-plugin.dev.ent.imbee.io and any successor endpoints
+   designated by imBee Limited.
+
+   "Non-Commercial Use" means personal, educational, research, or
+   internal evaluation use that does not generate revenue or provide
+   commercial advantage.
+
+   "Production Use" means any deployment in which the Software
+   processes real messages from real users, whether or not that
+   deployment generates revenue.
+
+2. Permitted Use
+
+   Subject to the terms of this Licence, imBee Limited grants you a
+   non-exclusive, non-transferable, royalty-free right to:
+
+   a) use, copy, and modify the Software for Non-Commercial Use; and
+
+   b) use the Software in Production, provided that all message
+      routing is performed exclusively through the imBee Routing
+      Service.
+
+3. Restrictions
+
+   You may not, without a separate written commercial licence from
+   imBee Limited:
+
+   a) use the Software in Production with any routing server other
+      than the imBee Routing Service;
+
+   b) offer the Software, or any derivative work, as a hosted or
+      managed service to third parties;
+
+   c) remove or alter any copyright, trademark, or licence notices
+      in the Software; or
+
+   d) sublicence or transfer any rights granted under this Licence.
+
+4. Commercial Licensing
+
+   To obtain a licence for self-hosted or white-label deployments,
+   contact imBee Limited at info@imbee.io or via WhatsApp at
+   https://wa.me/85230013636.
+
+5. Disclaimer of Warranties
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+   OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+   NON-INFRINGEMENT. IN NO EVENT SHALL IMBEE LIMITED BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF
+   THE SOFTWARE.

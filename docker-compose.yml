@@ -1,0 +1,23 @@
+services:
+  wa-backend:
+    build:
+      context: .
+      dockerfile: deploy/docker/backend.Dockerfile
+    container_name: wa-backend
+    environment:
+      HTTP_ADDR: ":8080"
+      ROUTING_BASE_URL: "${ROUTING_BASE_URL:-http://localhost:28080}"
+      STORE_DRIVER: "${STORE_DRIVER:-sqlite}"
+      SHARED_WA_NUMBER: "${SHARED_WA_NUMBER:-your-whatsapp-number}"
+      WEBHOOK_APP_SECRET: "${WEBHOOK_APP_SECRET:-dev-secret}"
+      WEBHOOK_VERIFY_TOKEN: "${WEBHOOK_VERIFY_TOKEN:-}"
+      PAIRING_CODE_TTL_SECONDS: "${PAIRING_CODE_TTL_SECONDS:-600}"
+      PAIR_RATE_LIMIT_PER_HOUR: "${PAIR_RATE_LIMIT_PER_HOUR:-5}"
+      WA_PROVIDER: "${WA_PROVIDER:-}"
+      WABA_TOKEN: "${WABA_TOKEN:-}"
+      WABA_PHONE_NUMBER_ID: "${WABA_PHONE_NUMBER_ID:-}"
+      D360_API_KEY: "${D360_API_KEY:-}"
+      D360_BASE_URL: "${D360_BASE_URL:-}"
+    ports:
+      # Host port avoids clashing with other services on 8080
+      - "28080:8080"

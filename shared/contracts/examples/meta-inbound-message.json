@@ -1,0 +1,21 @@
+{
+  "entry": [
+    {
+      "changes": [
+        {
+          "value": {
+            "messages": [
+              {
+                "from": "+85260000000",
+                "id": "wamid.HBgLTEST123",
+                "text": {
+                  "body": "CLAW-A3F9-Z7KL"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
