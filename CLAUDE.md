@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-An MVP for connecting WhatsApp Cloud API (via imBee routing) to the OpenClaw AI agent platform. It consists of two independently deployable pieces:
+An MVP for connecting WhatsApp Cloud API (via imBee routing) to an AI agent. The backend is agent-agnostic; one or more plugins consume the same WS + HTTP contract.
 
-- **`backend/`** — Go routing server that bridges Meta webhooks to connected OpenClaw plugin instances via WebSocket
-- **`plugin/`** — TypeScript OpenClaw channel plugin that runs inside the OpenClaw gateway process
+- **`backend/`** — Go routing server that bridges Meta webhooks to connected plugin instances via WebSocket. Knows nothing about which agent is on the other end.
+- **`openclaw-plugin/`** — TypeScript OpenClaw channel plugin that runs inside the OpenClaw gateway process.
+- **`claude-plugin/`** — Standalone Node service that forwards inbound WhatsApp messages into a local Claude Code CLI session (per paired WhatsApp user).
 
 ## Commands
 
@@ -41,7 +42,7 @@ TEXT="hello" ./scripts/replay-webhook.sh      # simulate inbound webhook
 The plugin has no build step — OpenClaw loads `.ts` files directly at runtime (Node >=22, peer dep `openclaw >=2026.4.15`). Install into a local OpenClaw environment:
 
 ```bash
-openclaw plugins install -l ./plugin    # dev link (no copy)
+openclaw plugins install -l ./openclaw-plugin    # dev link (no copy)
 openclaw gateway restart
 ```
 
@@ -77,9 +78,10 @@ OpenClaw gateway
           → deliver() → sendOutboundText()  (transport.ts → POST /api/v1/send)
 ```
 
-- **`plugin/src/transport.ts`** — config resolution (`resolveAccountFromCfg`) and HTTP calls (`requestPairingCode`, `sendOutboundText`)
-- **`plugin/src/inbound.ts`** — assembles the OpenClaw agent envelope from raw WA message fields; delegates delivery back via `sendOutboundText`
-- **`plugin/src/gateway.ts`** — long-lived WS loop with exponential backoff; the main account entry-point
+- **`openclaw-plugin/src/transport.ts`** — config resolution (`resolveAccountFromCfg`) and HTTP calls (`requestPairingCode`, `sendOutboundText`)
+- **`openclaw-plugin/src/inbound.ts`** — assembles the OpenClaw agent envelope from raw WA message fields; delegates delivery back via `sendOutboundText`
+- **`openclaw-plugin/src/gateway.ts`** — long-lived WS loop with exponential backoff; the main account entry-point
+- **`claude-plugin/src/index.ts`** — equivalent WS loop for the Claude Code bridge; spawns `claude -p --resume <sid>` per turn
 - Plugin config lives under `channels.whatsapp-official` in the OpenClaw config file
 
 ### Environment variables (backend)
@@ -99,5 +101,5 @@ Docker Compose defaults expose backend on `localhost:28080` and Postgres on `loc
 ## Key Constraints
 
 - `PLUGIN_ID = "whatsapp-official"` must stay in sync across `constants.ts`, `openclaw.plugin.json`, and any `defineChannelPluginEntry({ id })` call.
-- Plugin version must be bumped in **both** `plugin/package.json` and `plugin/openclaw.plugin.json` together before publishing.
+- OpenClaw plugin version must be bumped in **both** `openclaw-plugin/package.json` and `openclaw-plugin/openclaw.plugin.json` together before publishing.
 - `/api/v1/send` is an MVP stub — it does not call Meta. Production work requires implementing the actual Cloud API call in `handlers.go:handleSend`.

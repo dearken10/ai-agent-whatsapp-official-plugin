@@ -31,8 +31,8 @@ set +a
 
 ROUTING_BASE_URL="${ROUTING_BASE_URL:?ROUTING_BASE_URL is not set in $ENV_FILE}"
 
-TRANSPORT_FILE="$REPO_ROOT/plugin/src/transport.ts"
-SCHEMA_FILE="$REPO_ROOT/plugin/schema/config.json"
+TRANSPORT_FILE="$REPO_ROOT/openclaw-plugin/src/transport.ts"
+SCHEMA_FILE="$REPO_ROOT/openclaw-plugin/schema/config.json"
 
 echo "Baking routingBaseUrl → $ROUTING_BASE_URL"
 sed -i '' "s|section.routingBaseUrl ?? \"[^\"]*\"|section.routingBaseUrl ?? \"${ROUTING_BASE_URL}\"|" "$TRANSPORT_FILE"

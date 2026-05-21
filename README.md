@@ -1,15 +1,18 @@
 # OpenClaw Official WhatsApp Plugin
 
-> **Looking to install the plugin?** See [`plugin/README.md`](./plugin/README.md) for end-user installation, FAQ, and plan details.
+> **Looking to install the OpenClaw plugin?** See [`openclaw-plugin/README.md`](./openclaw-plugin/README.md) for end-user installation, FAQ, and plan details.
+>
+> **Want to forward WhatsApp into a Claude Code session?** See [`claude-plugin/README.md`](./claude-plugin/README.md).
 
-This repo contains the backend routing server and the OpenClaw channel plugin that together bridge WhatsApp (via imBee) to a locally-running OpenClaw AI agent.
+This repo contains the backend routing server plus one or more agent plugins that bridge WhatsApp (via imBee) to a locally-running AI agent. The backend is agent-agnostic — it speaks a small WebSocket + HTTP contract that any plugin can consume.
 
 **Repo layout:**
 
 | Path | Description |
 |:---|:---|
-| `backend/` | Go routing server — pairing, webhook verification, WebSocket hub, media proxy |
-| `plugin/` | OpenClaw channel plugin — WebSocket inbound bridge, media download, outbound send |
+| `backend/` | Go routing server — pairing, webhook verification, WebSocket hub, media proxy (agent-agnostic) |
+| `openclaw-plugin/` | OpenClaw channel plugin — runs inside the OpenClaw gateway |
+| `claude-plugin/` | Claude Code bridge — forwards each paired WhatsApp user to their own Claude Code session |
 | `docs/` | PRD and technical design |
 | `scripts/` | Dev, ngrok, deploy, and publish helpers |
 
@@ -66,7 +69,7 @@ make ws API_KEY=imbee_xxx
 ### 5. Install the plugin into OpenClaw
 
 ```bash
-openclaw plugins install -l ./plugin    # dev link (no copy)
+openclaw plugins install -l ./openclaw-plugin    # dev link (no copy)
 openclaw gateway restart
 ```
 
@@ -238,7 +241,7 @@ Set `WA_PROVIDER` in `.env`:
 
 ```bash
 # Dev link (no copy)
-openclaw plugins install -l ./plugin
+openclaw plugins install -l ./openclaw-plugin
 openclaw gateway restart
 
 # From npm / ClawHub (after publishing)
@@ -256,7 +259,7 @@ openclaw plugins install openclaw-channel-whatsapp-official
 
 ### Publishing (npm + ClawHub)
 
-Bump `version` in **both** `plugin/package.json` and `plugin/openclaw.plugin.json`, then:
+Bump `version` in **both** `openclaw-plugin/package.json` and `openclaw-plugin/openclaw.plugin.json`, then:
 
 ```bash
 ./scripts/publish-plugin-npm-clawhub.sh
