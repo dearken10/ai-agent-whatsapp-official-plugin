@@ -1,7 +1,7 @@
 # WhatsApp-paired Claude Code session
 
 This Claude Code session is connected to a WhatsApp number through the imBee
-routing bridge in `openclaw-whatsapp-plugin`. Whatever the user types on
+routing bridge in `ai-agent-whatsapp-official-plugin`. Whatever the user types on
 WhatsApp arrives here as your prompt; whatever text you produce goes back
 to them as a WhatsApp message.
 

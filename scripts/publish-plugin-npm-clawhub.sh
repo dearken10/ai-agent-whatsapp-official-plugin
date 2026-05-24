@@ -44,7 +44,7 @@ sed -i '' "s|\"default\": \"http[^\"]*\"|\"default\": \"${ROUTING_BASE_URL}\"|" 
 
 PLUGIN_DIR="$REPO_ROOT/openclaw-plugin"
 VERSION=$(node -p "require('$PLUGIN_DIR/package.json').version")
-REPO="${CLAWHUB_REPO:-dearken10/openclaw-whatsapp-plugin}"
+REPO="${CLAWHUB_REPO:-dearken10/ai-agent-whatsapp-official-plugin}"
 SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 echo ""

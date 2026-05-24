@@ -189,7 +189,7 @@ The free tier has no time limit or credit card requirement. It uses a shared imB
 Message imBee directly on WhatsApp: [wa.me/85230013636](https://wa.me/85230013636?text=I+need+a+dedicated+whatsapp+number+for+ai+agent). The Paid Plan includes a dedicated Official WhatsApp Business number with your custom display name and business profile.
 
 **Is this plugin open source?**
-The source is available at [github.com/dearken10/openclaw-whatsapp-plugin](https://github.com/dearken10/openclaw-whatsapp-plugin) under a source-available licence. Free for personal, non-commercial, and development use. Production deployments must route through imBee's hosted service. For self-hosted or white-label commercial use, contact info@imbee.io.
+The source is available at [github.com/dearken10/ai-agent-whatsapp-official-plugin](https://github.com/dearken10/ai-agent-whatsapp-official-plugin) under a source-available licence. Free for personal, non-commercial, and development use. Production deployments must route through imBee's hosted service. For self-hosted or white-label commercial use, contact info@imbee.io.
 
 ---
 
@@ -197,4 +197,4 @@ The source is available at [github.com/dearken10/openclaw-whatsapp-plugin](https
 
 - [imBee](https://imbee.io) — operator of the shared WhatsApp Business Account
 - [OpenClaw Documentation](https://docs.openclaw.ai)
-- [Report an issue](https://github.com/dearken10/openclaw-whatsapp-plugin/issues)
+- [Report an issue](https://github.com/dearken10/ai-agent-whatsapp-official-plugin/issues)

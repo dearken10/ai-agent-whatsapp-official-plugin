@@ -10,12 +10,12 @@
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dearken10/openclaw-whatsapp-plugin.git"
+    "url": "git+https://github.com/dearken10/ai-agent-whatsapp-official-plugin.git"
   },
   "bugs": {
-    "url": "https://github.com/dearken10/openclaw-whatsapp-plugin/issues"
+    "url": "https://github.com/dearken10/ai-agent-whatsapp-official-plugin/issues"
   },
-  "homepage": "https://github.com/dearken10/openclaw-whatsapp-plugin#readme",
+  "homepage": "https://github.com/dearken10/ai-agent-whatsapp-official-plugin#readme",
   "type": "module",
   "main": "./index.ts",
   "engines": {
