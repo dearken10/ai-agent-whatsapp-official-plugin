@@ -229,12 +229,18 @@ func (s *sqliteStore) FindByPhone(phone string) (*PairingRecord, bool, error) {
 }
 
 func (s *sqliteStore) FindByAPIKey(apiKey string) (*PairingRecord, bool, error) {
+	// Tie-break by status so that when two rows for the same api_key share
+	// the latest updated_at (e.g. ActivatePersistentPairing wrote both the
+	// supersede-DISCONNECTED and the new-ACTIVE rows in one transaction),
+	// the ACTIVE row wins and gets cached. Without this, handleWS could
+	// cache the DISCONNECTED row and silently drop subsequent webhooks.
 	row := s.db.QueryRow(`
 		SELECT id, instance_id, api_key, pairing_code, phone_number, wab_number,
 		       status, pairing_mode, invite_id, expires_at, created_at, updated_at
 		FROM   pairing_records
 		WHERE  api_key = ?
-		ORDER  BY updated_at DESC
+		ORDER  BY updated_at DESC,
+		          CASE status WHEN 'ACTIVE' THEN 0 WHEN 'PENDING' THEN 1 ELSE 2 END
 		LIMIT  1`, apiKey)
 	r, err := scanRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
