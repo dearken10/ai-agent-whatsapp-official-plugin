@@ -225,6 +225,14 @@ async function runOnce(cfg: Config, store: SessionStore, buffer: Buffer): Promis
           console.log(`window opened for ${phone}; flushing buffer`);
           const r = await flushPending(cfg, buffer, LOCAL_WAB, phone);
           console.log(`flush delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+          // Buffer was empty — give the user feedback so their tap isn't silently swallowed.
+          if (r.delivered === 0 && r.remaining === 0) {
+            try {
+              await sendOutboundText(cfg, phone, "There is no unread messages.");
+            } catch (err) {
+              console.warn(`window_opened fallback send failed phone=${phone} err=${String(err)}`);
+            }
+          }
           return;
         }
         if (envelope.type !== "INBOUND_MESSAGE") return;

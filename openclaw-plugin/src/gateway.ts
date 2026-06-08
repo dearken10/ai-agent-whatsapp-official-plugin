@@ -7,7 +7,7 @@ import { handleWhatsappOfficialInbound } from "./inbound.js";
 import { PLUGIN_ID } from "./constants.js";
 import type { ResolvedWhatsappOfficialAccount } from "./types.js";
 import { Buffer } from "./buffer.js";
-import { flushPending, LOCAL_WAB, setActiveBuffer } from "./transport.js";
+import { flushPending, LOCAL_WAB, sendOutboundText, setActiveBuffer } from "./transport.js";
 
 type WsEnvelope = {
   type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "WINDOW_OPENED" | "HEARTBEAT" | "ERROR";
@@ -148,6 +148,14 @@ export async function startWhatsappOfficialGatewayAccount(
               ctx.log?.info(`${PLUGIN_ID}: WINDOW_OPENED phone=${phone}; flushing`);
               const r = await flushPending({ cfg: ctx.cfg as OpenClawConfig, accountId: account.accountId, buffer, wab: LOCAL_WAB, phone });
               ctx.log?.info(`${PLUGIN_ID}: flush delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+              // Buffer was empty — give the user feedback so their tap isn't silently swallowed.
+              if (r.delivered === 0 && r.remaining === 0) {
+                try {
+                  await sendOutboundText({ cfg: ctx.cfg as OpenClawConfig, accountId: account.accountId, to: phone, text: "There is no unread messages.", buffer });
+                } catch (err) {
+                  ctx.log?.warn(`${PLUGIN_ID}: window_opened fallback send failed phone=${phone} err=${String(err)}`);
+                }
+              }
               return;
             }
             if (envelope.type !== "INBOUND_MESSAGE") {
