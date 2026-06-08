@@ -45,6 +45,10 @@ func (f *fakeProvider) SendMedia(_ context.Context, _, _, _, _, _ string) (strin
 	return "wamid.media", nil
 }
 
+func (f *fakeProvider) SendFileMedia(_ context.Context, _, _, _, _ string, _ []byte, _ string) (string, error) {
+	return "wamid.file-media", nil
+}
+
 func (f *fakeProvider) SendTemplate(_ context.Context, to, name, lang string, components []whatsapp.TemplateComponent) (string, error) {
 	f.mu.Lock()
 	f.sendTemplateCalls++
