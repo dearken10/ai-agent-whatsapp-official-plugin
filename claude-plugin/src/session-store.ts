@@ -32,4 +32,11 @@ export class SessionStore {
     await mkdir(dirname(this.path), { recursive: true });
     await writeFile(this.path, JSON.stringify(this.map, null, 2));
   }
+
+  async clear(phone: string): Promise<void> {
+    if (!(phone in this.map)) return;
+    delete this.map[phone];
+    await mkdir(dirname(this.path), { recursive: true });
+    await writeFile(this.path, JSON.stringify(this.map, null, 2));
+  }
 }

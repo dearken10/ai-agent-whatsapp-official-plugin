@@ -6,7 +6,15 @@ import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
 import { fetchMedia, flushPending, LOCAL_WAB, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
 import { Buffer } from "./buffer.ts";
 import { SessionStore } from "./session-store.ts";
-import { dispatchToClaude, dispatchToClaudeStream, workspaceForPhone } from "./claude-session.ts";
+import {
+  dispatchToClaude,
+  dispatchToClaudeStream,
+  SessionResetError,
+  workspaceForPhone,
+} from "./claude-session.ts";
+
+const SESSION_RESET_NOTICE =
+  "Sorry — Claude hit an API error and our chat session got into a bad state. I've reset it. Please resend your message.";
 
 type WsEnvelope = {
   type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "WINDOW_OPENED" | "HEARTBEAT" | "ERROR";
@@ -159,6 +167,13 @@ async function handleInbound(
       console.log(`claude reply session=${sessionId} (streamed)`);
     } catch (err) {
       if (heartbeat) await heartbeat.stop();
+      if (err instanceof SessionResetError) {
+        console.log(`session reset for ${from}: ${err.reason}`);
+        // Drop any partial buffered text — its context is gone.
+        bufferedFinalText = null;
+        await sendOutboundText(cfg, from, SESSION_RESET_NOTICE);
+        return;
+      }
       throw err;
     }
     return;
@@ -181,6 +196,11 @@ async function handleInbound(
     }
   } catch (err) {
     if (heartbeat) await heartbeat.stop();
+    if (err instanceof SessionResetError) {
+      console.log(`session reset for ${from}: ${err.reason}`);
+      await sendOutboundText(cfg, from, SESSION_RESET_NOTICE);
+      return;
+    }
     throw err;
   }
 }

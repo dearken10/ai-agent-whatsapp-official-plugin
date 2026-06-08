@@ -76,6 +76,23 @@ type ClaudeResult = {
   subtype?: string;
 };
 
+// Claude Code writes synthetic "API Error: …" assistant messages into the
+// session transcript when the upstream API refuses (usage policy, 4xx). Those
+// synthetic messages carry a UUID id, not the required `msg_…` id, so the
+// next `--resume` 400s with "previous_message_id must start with msg_" — the
+// session is permanently poisoned. Detect the marker in streamed text so we
+// can clear the session id and start fresh on the next turn.
+const API_ERROR_TEXT_PATTERN = /^API Error:/;
+
+export class SessionResetError extends Error {
+  reason: string;
+  constructor(reason: string) {
+    super(`session reset: ${reason}`);
+    this.name = "SessionResetError";
+    this.reason = reason;
+  }
+}
+
 function workspaceFor(cfg: Config, phone: string): string {
   // Phone numbers are stable identifiers; sanitize to a filesystem-safe dirname.
   const safe = phone.replace(/[^a-zA-Z0-9]/g, "_");
@@ -117,16 +134,20 @@ export async function dispatchToClaude(
     throw new Error(`claude returned non-JSON output: ${stdout.slice(0, 500)}`);
   }
 
+  const resultText = (parsed.result ?? "").trim();
+  if (API_ERROR_TEXT_PATTERN.test(resultText)) {
+    await store.clear(phone);
+    throw new SessionResetError(resultText.split("\n")[0].slice(0, 200));
+  }
   if (parsed.is_error) {
-    throw new Error(`claude error (${parsed.subtype ?? "unknown"}): ${parsed.result ?? ""}`);
+    throw new Error(`claude error (${parsed.subtype ?? "unknown"}): ${resultText}`);
   }
 
-  const text = (parsed.result ?? "").trim();
   const sessionId = parsed.session_id ?? resume ?? "";
   if (sessionId && sessionId !== resume) await store.set(phone, sessionId);
   console.log(`claude turn done phone=${phone} sessionId=${sessionId || "(none)"}`);
 
-  return { text, sessionId };
+  return { text: resultText, sessionId };
 }
 
 // Streaming variant: spawn `claude --output-format stream-json --verbose` and
@@ -182,13 +203,36 @@ export async function dispatchToClaudeStream(
   // the onEvent callback, the for-await loop unwinds and the final store.set
   // never runs — that would silently drop the new session id and the NEXT
   // turn would spawn without --resume, starting from a blank history.
+  //
+  // The flip side: if the CLI/API itself errors (usage-policy refusal,
+  // non-zero exit), the forked session id is poisoned — its transcript may
+  // have a user turn with no valid msg_… assistant reply, and the NEXT
+  // --resume will 400 with "previous_message_id must start with msg_". So
+  // track whether we persisted, and roll back to the prior session id on
+  // terminal errors below.
+  let persistedNewSession = false;
   const persistIfNew = async (id: string): Promise<void> => {
     if (!id || id === resume) return;
     await store.set(phone, id);
+    persistedNewSession = true;
+  };
+  const rollbackSession = async (): Promise<void> => {
+    if (!persistedNewSession) return;
+    if (resume) await store.set(phone, resume);
+    else await store.clear(phone);
+    persistedNewSession = false;
   };
 
   let sessionId = resume ?? "";
   let resultError: string | null = null;
+  let sessionPoisoned = false;
+  let poisonReason = "";
+  const markPoisoned = (text: string): void => {
+    if (sessionPoisoned) return;
+    sessionPoisoned = true;
+    poisonReason = text.split("\n")[0].slice(0, 200);
+    console.log(`stream API error suppressed (session will reset): ${poisonReason}`);
+  };
   const rl = readline.createInterface({ input: child.stdout });
 
   for await (const line of rl) {
@@ -214,7 +258,12 @@ export async function dispatchToClaudeStream(
       console.log(`stream assistant blocks=[${blockTypes.join(",")}]`);
       for (const block of message?.content ?? []) {
         if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-          await onEvent({ kind: "text", text: block.text.trim() });
+          const text = block.text.trim();
+          if (API_ERROR_TEXT_PATTERN.test(text)) {
+            markPoisoned(text);
+            continue;
+          }
+          await onEvent({ kind: "text", text });
         } else if (block.type === "tool_use") {
           const name = String(block.name ?? "Tool");
           const summary = summarizeTool(name, block.input);
@@ -229,8 +278,12 @@ export async function dispatchToClaudeStream(
         sessionId = event.session_id;
         await persistIfNew(sessionId);
       }
+      const resultText = typeof event.result === "string" ? event.result : "";
       if (event.is_error) {
-        resultError = `claude error (${event.subtype ?? "unknown"}): ${event.result ?? ""}`;
+        resultError = `claude error (${event.subtype ?? "unknown"}): ${resultText}`;
+      }
+      if (API_ERROR_TEXT_PATTERN.test(resultText)) {
+        markPoisoned(resultText);
       }
       // Signal end-of-turn while the stream is still being read, so the
       // caller can cancel any pending post-message typing schedule before
@@ -240,11 +293,20 @@ export async function dispatchToClaudeStream(
   }
 
   const code = await exitPromise;
+  if (sessionPoisoned) {
+    await store.clear(phone);
+    persistedNewSession = false;
+    throw new SessionResetError(poisonReason);
+  }
   if (code !== 0) {
+    await rollbackSession();
     throw new Error(`claude exited ${code}: ${stderr.trim()}`);
   }
 
-  if (resultError) throw new Error(resultError);
+  if (resultError) {
+    await rollbackSession();
+    throw new Error(resultError);
+  }
   // Belt-and-suspenders: most session ids are persisted eagerly above; this
   // catches the rare case where session_id only showed up after init/result.
   await persistIfNew(sessionId);
