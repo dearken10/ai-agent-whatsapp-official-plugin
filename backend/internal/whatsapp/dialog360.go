@@ -163,13 +163,19 @@ func (p *dialog360Provider) DownloadMedia(ctx context.Context, mediaID, directUR
 
 func (p *dialog360Provider) SendMedia(ctx context.Context, to, mediaType, mediaURL, caption, filename string) (string, error) {
 	url := p.baseURL + "/messages"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildMediaPayload(to, mediaType, mediaURL, caption, filename)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildMediaPayload(to, mediaType, mediaURL, "", caption, filename)))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("D360-API-KEY", p.apiKey)
 	return doSend(req)
+}
+
+// SendFileMedia is not yet implemented for 360dialog — falls back to an
+// error so the caller can surface this clearly.
+func (p *dialog360Provider) SendFileMedia(_ context.Context, _, _, _, _ string, _ []byte, _ string) (string, error) {
+	return "", fmt.Errorf("SendFileMedia not yet implemented for 360dialog provider")
 }
 
 func (p *dialog360Provider) SendText(ctx context.Context, to, text string) (string, error) {

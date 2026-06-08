@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 )
 
@@ -105,13 +107,85 @@ func (p *metaProvider) DownloadMedia(ctx context.Context, mediaID, directURL str
 
 func (p *metaProvider) SendMedia(ctx context.Context, to, mediaType, mediaURL, caption, filename string) (string, error) {
 	url := "https://graph.facebook.com/v19.0/" + p.phoneNumberID + "/messages"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildMediaPayload(to, mediaType, mediaURL, caption, filename)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildMediaPayload(to, mediaType, mediaURL, "", caption, filename)))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	return doSend(req)
+}
+
+// SendFileMedia uploads raw bytes to Meta's media endpoint, then sends a
+// message referencing the returned media id. Avoids needing a public URL.
+func (p *metaProvider) SendFileMedia(ctx context.Context, to, mediaType, mimeType, filename string, data []byte, caption string) (string, error) {
+	mediaID, err := p.uploadMedia(ctx, mediaType, mimeType, filename, data)
+	if err != nil {
+		return "", fmt.Errorf("media upload: %w", err)
+	}
+	url := "https://graph.facebook.com/v19.0/" + p.phoneNumberID + "/messages"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildMediaPayload(to, mediaType, "", mediaID, caption, filename)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	return doSend(req)
+}
+
+// uploadMedia POSTs raw bytes to Meta's /PHONE_ID/media endpoint and returns
+// the media id. The id is valid for 30 days and can be used in subsequent
+// message sends.
+func (p *metaProvider) uploadMedia(ctx context.Context, mediaType, mimeType, filename string, data []byte) (string, error) {
+	uploadURL := "https://graph.facebook.com/v19.0/" + p.phoneNumberID + "/media"
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("messaging_product", "whatsapp")
+	_ = mw.WriteField("type", mimeType)
+
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
+	if mimeType != "" {
+		h.Set("Content-Type", mimeType)
+	}
+	fw, err := mw.CreatePart(h)
+	if err != nil {
+		return "", err
+	}
+	if _, err = fw.Write(data); err != nil {
+		return "", err
+	}
+	if err = mw.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+p.token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("meta media upload %d: %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("meta media upload: empty id in response")
+	}
+	return out.ID, nil
 }
 
 // SendTypingIndicator is not supported by the Meta Cloud API in this way;
