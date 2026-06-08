@@ -1,13 +1,44 @@
 {
-  "name": "claude-plugin",
+  "name": "claude-whatsapp-official-plugin",
   "version": "0.1.0",
   "description": "Forward inbound WhatsApp messages (via the imBee routing backend) into a local Claude Code CLI session per paired sender.",
-  "private": true,
-  "type": "module",
-  "main": "./src/index.ts",
-  "engines": {
-    "node": ">=22"
+  "author": {
+    "name": "imBee Limited",
+    "email": "info@imbee.io",
+    "url": "https://imbee.io"
   },
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dearken10/ai-agent-whatsapp-official-plugin.git",
+    "directory": "claude-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/dearken10/ai-agent-whatsapp-official-plugin/issues"
+  },
+  "homepage": "https://github.com/dearken10/ai-agent-whatsapp-official-plugin#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "whatsapp",
+    "ai-agent",
+    "imbee"
+  ],
+  "bin": {
+    "claude-whatsapp-official-plugin": "bin/cli.mjs"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "bin",
+    "src",
+    "workspace-template",
+    ".env.example"
+  ],
   "scripts": {
     "start": "node --env-file-if-exists=.env --experimental-strip-types src/index.ts",
     "setup": "npm install --no-audit --no-fund --loglevel=error && node --env-file-if-exists=.env --experimental-strip-types src/setup.ts && npm start",

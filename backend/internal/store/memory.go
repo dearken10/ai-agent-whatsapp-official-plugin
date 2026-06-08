@@ -20,19 +20,31 @@ type Memory struct {
 	invitesByID      map[string]*PersistentInvite
 	invitesByCode    map[string]*PersistentInvite
 	invitesByAPIKey  map[string]*PersistentInvite
+
+	// Template throttle: keyed by templateThrottleKey(wab, phone, template).
+	templateLastSentAt map[string]time.Time
 }
 
 func NewMemory() *Memory {
 	return &Memory{
-		byCode:            map[string]*PairingRecord{},
-		byPhone:           map[string]*PairingRecord{},
-		byInstance:        map[string][]*PairingRecord{},
-		byAPIKey:          map[string]*PairingRecord{},
-		pairRequestsByIns: map[string][]time.Time{},
-		invitesByID:       map[string]*PersistentInvite{},
-		invitesByCode:     map[string]*PersistentInvite{},
-		invitesByAPIKey:   map[string]*PersistentInvite{},
+		byCode:             map[string]*PairingRecord{},
+		byPhone:            map[string]*PairingRecord{},
+		byInstance:         map[string][]*PairingRecord{},
+		byAPIKey:           map[string]*PairingRecord{},
+		pairRequestsByIns:  map[string][]time.Time{},
+		invitesByID:        map[string]*PersistentInvite{},
+		invitesByCode:      map[string]*PersistentInvite{},
+		invitesByAPIKey:    map[string]*PersistentInvite{},
+		templateLastSentAt: map[string]time.Time{},
 	}
+}
+
+// templateThrottleKey forms the composite key for the template throttle map.
+// The plus-separator works because phone numbers and template names cannot
+// contain '+' in legal WhatsApp / template-name characters (E.164 phones
+// canonicalise to leading-`+` digits and template names are `[a-z0-9_]+`).
+func templateThrottleKey(wab, phone, template string) string {
+	return wab + "+" + phone + "+" + template
 }
 
 func (m *Memory) CreatePending(record *PairingRecord) error {
@@ -175,6 +187,23 @@ func (m *Memory) TrackPairRequest(clientIP string, now time.Time, limit int) (bo
 	filtered = append(filtered, now)
 	m.pairRequestsByIns[clientIP] = filtered
 	return true, nil
+}
+
+func (m *Memory) WasTemplateSentRecently(wab, phone, template string, within time.Duration, now time.Time) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	last, ok := m.templateLastSentAt[templateThrottleKey(wab, phone, template)]
+	if !ok {
+		return false, nil
+	}
+	return now.Sub(last) < within, nil
+}
+
+func (m *Memory) MarkTemplateSent(wab, phone, template string, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.templateLastSentAt[templateThrottleKey(wab, phone, template)] = now
+	return nil
 }
 
 func (m *Memory) Close() error {

@@ -32,6 +32,12 @@ type Config struct {
 	WABAPhoneNumberID string
 	D360APIKey        string
 	D360BaseURL       string
+
+	// 24-hour window re-engagement template
+	ReengagementTemplateName   string        // template name registered with the provider
+	ReengagementTemplateLang   string        // BCP-47 language code, e.g. "en"
+	ReengagementButtonPayload  string        // quick-reply payload that triggers WINDOW_OPENED
+	TemplateThrottleHours      time.Duration // per-(wab, phone, template) cooldown
 }
 
 func Load() Config {
@@ -53,6 +59,10 @@ func Load() Config {
 		WABAPhoneNumberID:  getenv("WABA_PHONE_NUMBER_ID", ""),
 		D360APIKey:         getenv("D360_API_KEY", ""),
 		D360BaseURL:        getenv("D360_BASE_URL", ""),
+		ReengagementTemplateName:  getenv("REENGAGEMENT_TEMPLATE_NAME", "smart_session_20260521"),
+		ReengagementTemplateLang:  getenv("REENGAGEMENT_TEMPLATE_LANG", "en"),
+		ReengagementButtonPayload: getenv("REENGAGEMENT_BUTTON_PAYLOAD", "OPENCLAW_READ_NOW"),
+		TemplateThrottleHours:     time.Duration(getint("TEMPLATE_THROTTLE_HOURS", 24)) * time.Hour,
 	}
 }
 

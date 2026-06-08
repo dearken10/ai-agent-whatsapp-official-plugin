@@ -5,7 +5,7 @@
 module.exports = {
   apps: [
     {
-      name: "claude-plugin",
+      name: "claude-whatsapp-official-plugin",
       cwd: __dirname,
       script: "src/index.ts",
       interpreter: "node",

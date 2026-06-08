@@ -56,6 +56,14 @@ CREATE TABLE IF NOT EXISTS pair_requests (
 	requested_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pair_requests_ip ON pair_requests(client_ip, requested_at);
+
+CREATE TABLE IF NOT EXISTS template_throttle (
+	wab_number    TEXT NOT NULL,
+	phone_number  TEXT NOT NULL,
+	template_name TEXT NOT NULL,
+	last_sent_at  INTEGER NOT NULL,
+	PRIMARY KEY (wab_number, phone_number, template_name)
+);
 `
 
 // NewSQLite opens (or creates) an SQLite database at path and runs the schema.
@@ -454,6 +462,34 @@ func (s *sqliteStore) TrackPairRequest(clientIP string, now time.Time, limit int
 		return false, fmt.Errorf("sqlite store: TrackPairRequest: commit: %w", err)
 	}
 	return true, nil
+}
+
+func (s *sqliteStore) WasTemplateSentRecently(wab, phone, template string, within time.Duration, now time.Time) (bool, error) {
+	row := s.db.QueryRow(`
+		SELECT last_sent_at FROM template_throttle
+		WHERE  wab_number = ? AND phone_number = ? AND template_name = ?`,
+		wab, phone, template)
+	var lastSent int64
+	if err := row.Scan(&lastSent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("sqlite store: WasTemplateSentRecently: %w", err)
+	}
+	return now.Sub(time.Unix(lastSent, 0)) < within, nil
+}
+
+func (s *sqliteStore) MarkTemplateSent(wab, phone, template string, now time.Time) error {
+	_, err := s.db.Exec(`
+		INSERT INTO template_throttle (wab_number, phone_number, template_name, last_sent_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(wab_number, phone_number, template_name)
+		DO UPDATE SET last_sent_at = excluded.last_sent_at`,
+		wab, phone, template, now.Unix())
+	if err != nil {
+		return fmt.Errorf("sqlite store: MarkTemplateSent: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) Close() error {

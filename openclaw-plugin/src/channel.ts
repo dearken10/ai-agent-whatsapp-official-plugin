@@ -24,7 +24,14 @@ const outbound: ChannelOutboundAdapter = {
       to,
       text,
     });
-    return { channel: CHANNEL_CONFIG_KEY, messageId: result.messageId };
+    // For status: "queued" (24h window closed → message buffered locally),
+    // we still return a synthetic messageId so the SDK records a delivery
+    // attempt; the local buffer will flush via /api/v1/send when the user
+    // reopens the window.
+    return {
+      channel: CHANNEL_CONFIG_KEY,
+      messageId: result.messageId ?? (result.localId ? `local:${result.localId}` : `local:queued`),
+    };
   },
 };
 

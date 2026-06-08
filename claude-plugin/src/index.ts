@@ -3,12 +3,13 @@ import { extname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
-import { fetchMedia, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
+import { fetchMedia, flushPending, LOCAL_WAB, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
+import { Buffer } from "./buffer.ts";
 import { SessionStore } from "./session-store.ts";
 import { dispatchToClaude, dispatchToClaudeStream, workspaceForPhone } from "./claude-session.ts";
 
 type WsEnvelope = {
-  type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "HEARTBEAT" | "ERROR";
+  type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "WINDOW_OPENED" | "HEARTBEAT" | "ERROR";
   payload: Record<string, unknown>;
   timestamp: string;
   message_id: string;
@@ -90,6 +91,7 @@ function chunkText(text: string, max = 3500): string[] {
 async function handleInbound(
   cfg: Config,
   store: SessionStore,
+  buffer: Buffer,
   envelope: WsEnvelope,
 ): Promise<void> {
   const from = String(envelope.payload.from ?? "");
@@ -123,7 +125,7 @@ async function handleInbound(
       const text = bufferedFinalText;
       bufferedFinalText = null;
       for (const chunk of chunkText(text)) {
-        await sendOutboundText(cfg, from, chunk);
+        await sendOutboundText(cfg, from, chunk, buffer);
       }
       // Intermediates get a follow-up typing ping; the final does NOT —
       // its purpose is to terminate the turn.
@@ -183,7 +185,7 @@ async function handleInbound(
   }
 }
 
-async function runOnce(cfg: Config, store: SessionStore): Promise<void> {
+async function runOnce(cfg: Config, store: SessionStore, buffer: Buffer): Promise<void> {
   const url = wsUrlFromHttpBase(cfg.routingBaseUrl);
   await new Promise<void>((resolve) => {
     const ws = new WebSocket(url, {
@@ -202,6 +204,12 @@ async function runOnce(cfg: Config, store: SessionStore): Promise<void> {
       pingTimer = setInterval(() => {
         if (ws.readyState === ws.OPEN) ws.ping();
       }, 30_000);
+      // Flush any buffer that survived a previous session. The server's
+      // template_throttle prevents duplicate billable template sends, so
+      // calling flush on a still-closed window is safe.
+      void flushAll(cfg, buffer).catch((err) => {
+        console.warn(`startup flush error: ${String(err)}`);
+      });
     });
 
     ws.on("message", async (raw) => {
@@ -211,8 +219,26 @@ async function runOnce(cfg: Config, store: SessionStore): Promise<void> {
           console.log("pairing complete");
           return;
         }
+        if (envelope.type === "WINDOW_OPENED") {
+          const phone = String(envelope.payload.phone ?? "");
+          if (!phone) return;
+          console.log(`window opened for ${phone}; flushing buffer`);
+          const r = await flushPending(cfg, buffer, LOCAL_WAB, phone);
+          console.log(`flush delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+          return;
+        }
         if (envelope.type !== "INBOUND_MESSAGE") return;
-        await handleInbound(cfg, store, envelope);
+        // Flush before agent dispatch so the user sees prior buffered context
+        // first; the agent then reacts to the inbound with that context already
+        // in the user's view.
+        const from = String(envelope.payload.from ?? "");
+        if (from) {
+          const r = await flushPending(cfg, buffer, LOCAL_WAB, from);
+          if (r.delivered > 0) {
+            console.log(`pre-dispatch flush delivered=${r.delivered} remaining=${r.remaining}`);
+          }
+        }
+        await handleInbound(cfg, store, buffer, envelope);
       } catch (err) {
         console.error(`inbound handling error: ${String(err)}`);
       }
@@ -226,15 +252,49 @@ async function runOnce(cfg: Config, store: SessionStore): Promise<void> {
   });
 }
 
+// flushAll runs flushPending for every (wab, phone) with pending entries on
+// disk. Called once per WS connect so that buffered messages from a prior
+// session attempt delivery as soon as we're back online.
+async function flushAll(cfg: Config, buffer: Buffer): Promise<void> {
+  const pairs = await buffer.enumeratePending();
+  if (pairs.length === 0) return;
+  console.log(`startup flush: ${pairs.length} (wab, phone) pair(s) with pending entries`);
+  for (const { wab, phone } of pairs) {
+    try {
+      const r = await flushPending(cfg, buffer, wab, phone);
+      console.log(`startup flush phone=${phone} delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+    } catch (err) {
+      console.warn(`startup flush failed phone=${phone} err=${String(err)}`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const cfg = loadConfig();
   const store = new SessionStore(cfg.sessionStorePath);
   await store.load();
 
+  const buffer = new Buffer({
+    dir: cfg.waBufferDir,
+    maxPerPhone: cfg.waBufferMaxPerPhone,
+    ttlMs: cfg.waBufferTtlHours * 3600_000,
+  });
+
+  // Sweep expired entries periodically. Best-effort; the sweep is idempotent
+  // so a missed tick is harmless.
+  const sweeperMs = cfg.waBufferSweepIntervalMin * 60_000;
+  setInterval(() => {
+    void buffer.sweepExpired().then((n) => {
+      if (n > 0) console.log(`buffer.expired removed=${n}`);
+    }).catch((err) => {
+      console.warn(`buffer sweep failed: ${String(err)}`);
+    });
+  }, sweeperMs).unref();
+
   let attempt = 0;
   for (;;) {
     try {
-      await runOnce(cfg, store);
+      await runOnce(cfg, store, buffer);
     } catch (err) {
       console.error(`run failed: ${String(err)}`);
     }

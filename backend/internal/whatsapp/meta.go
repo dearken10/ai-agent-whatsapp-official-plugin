@@ -128,3 +128,14 @@ func (p *metaProvider) SendText(ctx context.Context, to, text string) (string, e
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	return doSend(req)
 }
+
+func (p *metaProvider) SendTemplate(ctx context.Context, to, name, lang string, components []TemplateComponent) (string, error) {
+	url := "https://graph.facebook.com/v19.0/" + p.phoneNumberID + "/messages"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildTemplatePayload(to, name, lang, components)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	return doSend(req)
+}

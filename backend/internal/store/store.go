@@ -63,5 +63,12 @@ type Repository interface {
 	// Rate limiting
 	TrackPairRequest(clientIP string, now time.Time, limit int) (bool, error)
 
+	// Template throttle: enforces "send the re-engagement template at most
+	// once per (wab_number, phone_number, template_name) per TEMPLATE_THROTTLE_HOURS".
+	// WasTemplateSentRecently reports whether a successful send was recorded
+	// within `within` of `now`. MarkTemplateSent upserts the current timestamp.
+	WasTemplateSentRecently(wab, phone, template string, within time.Duration, now time.Time) (bool, error)
+	MarkTemplateSent(wab, phone, template string, now time.Time) error
+
 	Close() error
 }

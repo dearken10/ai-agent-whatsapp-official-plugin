@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -327,14 +328,70 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	} else {
 		messageID, sendErr = s.waProvider.SendText(r.Context(), req.ToPhoneNumber, req.Text)
 	}
-	if sendErr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed: " + sendErr.Error()})
+	if sendErr == nil {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":    "accepted",
+			"messageId": messageID,
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":    "accepted",
-		"messageId": messageID,
-	})
+
+	// 24h window closed: best-effort template dispatch + tell plugin to buffer.
+	// The server-side template_throttle store guarantees at most one billable
+	// template send per (wab, phone, template) per TEMPLATE_THROTTLE_HOURS,
+	// regardless of how the plugin behaves.
+	if errors.Is(sendErr, whatsapp.ErrWindowClosed) {
+		templateSent := s.dispatchReengagementTemplate(r.Context(), targetRecord.WabNumber, req.ToPhoneNumber)
+		log.Printf("[send] window_closed to=%s templateSent=%v", maskPhone(req.ToPhoneNumber), templateSent)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":       "window_closed",
+			"templateSent": templateSent,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed: " + sendErr.Error()})
+}
+
+// dispatchReengagementTemplate consults the throttle store and, if not recently
+// sent, fires the configured re-engagement template via the active provider.
+// Returns whether the template was actually delivered to the provider in this
+// call. A failure or throttle hit both return false; only a successful send
+// records the timestamp so a failed attempt does not consume the cooldown.
+func (s *Server) dispatchReengagementTemplate(ctx context.Context, wab, phone string) bool {
+	now := time.Now().UTC()
+	template := s.cfg.ReengagementTemplateName
+	recently, err := s.store.WasTemplateSentRecently(wab, phone, template, s.cfg.TemplateThrottleHours, now)
+	if err != nil {
+		log.Printf("[template] throttle lookup error wab=%s phone=%s err=%v", wab, maskPhone(phone), err)
+		// On store error, err on the side of caution: do NOT send (avoid duplicate spam).
+		return false
+	}
+	if recently {
+		log.Printf("[template] throttled wab=%s phone=%s template=%s", wab, maskPhone(phone), template)
+		return false
+	}
+	// Attach a quick-reply payload override so the user's tap echoes back
+	// ReengagementButtonPayload (the value isReengagementButtonReply matches on),
+	// not the button's visible label. WhatsApp templates only fix the button
+	// text at approval time; the payload is per-send.
+	components := []whatsapp.TemplateComponent{{
+		Type:    "button",
+		SubType: "quick_reply",
+		Index:   "0",
+		Parameters: []whatsapp.TemplateParameter{
+			{Type: "payload", Payload: s.cfg.ReengagementButtonPayload},
+		},
+	}}
+	if _, sendErr := s.waProvider.SendTemplate(ctx, phone, template, s.cfg.ReengagementTemplateLang, components); sendErr != nil {
+		log.Printf("[template] send failed wab=%s phone=%s template=%s err=%v", wab, maskPhone(phone), template, sendErr)
+		return false
+	}
+	if err := s.store.MarkTemplateSent(wab, phone, template, now); err != nil {
+		log.Printf("[template] mark sent failed wab=%s phone=%s err=%v", wab, maskPhone(phone), err)
+	}
+	log.Printf("[template] sent wab=%s phone=%s template=%s", wab, maskPhone(phone), template)
+	return true
 }
 
 func (s *Server) handleTyping(w http.ResponseWriter, r *http.Request) {
@@ -504,6 +561,12 @@ func (s *Server) routeIncoming(msg webhook.MetaWebhookMessage) {
 	now := time.Now().UTC()
 
 	log.Printf("[route] from=%s type=%s id=%s", maskPhone(from), msg.Type, messageID)
+	if msg.Type == "button" && msg.Button != nil {
+		log.Printf("[route] button payload=%q text=%q", msg.Button.Payload, msg.Button.Text)
+	}
+	if msg.Type == "interactive" && msg.Interactive != nil && msg.Interactive.ButtonReply != nil {
+		log.Printf("[route] interactive button_reply id=%q title=%q", msg.Interactive.ButtonReply.ID, msg.Interactive.ButtonReply.Title)
+	}
 
 	// Pairing codes always arrive as plain text.
 	if pairingCodeRegex.MatchString(msg.Text.Body) {
@@ -600,11 +663,28 @@ func (s *Server) routeIncoming(msg webhook.MetaWebhookMessage) {
 		log.Printf("[route] pairing not active for from=%s status=%s", maskPhone(from), record.Status)
 		return
 	}
+
+	// Detect re-engagement template "Read Now" quick-reply tap. The button
+	// payload arrives either as msg.Type=="button" (template-attached quick
+	// reply) or msg.Type=="interactive" with an interactive.button_reply
+	// whose id matches the configured payload. In both cases we suppress
+	// the synthetic event from the agent and push WINDOW_OPENED so the
+	// plugin can flush its local buffer.
+	if s.isReengagementButtonReply(msg) {
+		log.Printf("[route] WINDOW_OPENED via button-reply instance=%s phone=%s", record.InstanceID, maskPhone(from))
+		_ = s.hub.Send(record.InstanceID, "WINDOW_OPENED", messageID, map[string]string{
+			"wab":   record.WabNumber,
+			"phone": from,
+		})
+		return
+	}
+
 	log.Printf("[route] dispatching to instance=%s type=%s", record.InstanceID, msg.Type)
 
 	payload := map[string]string{
 		"from":      from,
 		"messageId": messageID,
+		"wab":       record.WabNumber,
 	}
 
 	switch msg.Type {
@@ -768,6 +848,27 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// isReengagementButtonReply reports whether msg is the "Read Now" tap on the
+// re-engagement template. Matches both Meta's `button` payload (used when a
+// quick-reply button is attached to a TEMPLATE message) and the more general
+// `interactive.button_reply` shape. Either id/payload string equal to the
+// configured ReengagementButtonPayload counts as a hit.
+func (s *Server) isReengagementButtonReply(msg webhook.MetaWebhookMessage) bool {
+	want := s.cfg.ReengagementButtonPayload
+	if want == "" {
+		return false
+	}
+	if msg.Type == "button" && msg.Button != nil && msg.Button.Payload == want {
+		return true
+	}
+	if msg.Type == "interactive" && msg.Interactive != nil &&
+		msg.Interactive.Type == "button_reply" && msg.Interactive.ButtonReply != nil &&
+		msg.Interactive.ButtonReply.ID == want {
+		return true
+	}
+	return false
 }
 
 // maskPhone redacts the middle digits of a phone number for safe logging.

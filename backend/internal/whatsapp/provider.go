@@ -11,6 +11,7 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,17 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// ErrWindowClosed is returned by SendText / SendMedia when the WhatsApp 24-hour
+// customer service window for the recipient has expired and the provider
+// rejected the message with error code 131047 (Meta) or its equivalent on
+// 360dialog. handleSend branches on errors.Is(err, ErrWindowClosed) to dispatch
+// the re-engagement template and tell the plugin to buffer.
+var ErrWindowClosed = errors.New("whatsapp: 24h customer service window closed")
+
+// windowClosedCode is the Meta error code surfaced by both Meta Cloud API and
+// 360dialog when an outbound session message is sent outside the 24h window.
+const windowClosedCode = 131047
 
 // Provider delivers outbound WhatsApp messages, downloads inbound media, and
 // validates inbound webhook requests. All implementations must be safe for
@@ -36,6 +48,12 @@ type Provider interface {
 	// non-empty, is the pre-resolved download URL from the webhook payload and
 	// skips the step-1 metadata lookup (faster, avoids an extra round-trip).
 	DownloadMedia(ctx context.Context, mediaID, directURL string) (data []byte, mimeType string, err error)
+
+	// SendTemplate sends an approved template message. Allowed outside the 24h
+	// customer service window. name is the template name as registered with
+	// the provider, lang is the BCP-47 language code (e.g. "en", "en_US").
+	// components may be nil for templates with no variables.
+	SendTemplate(ctx context.Context, to, name, lang string, components []TemplateComponent) (messageID string, err error)
 
 	// SendTypingIndicator marks the given inbound message as read and shows
 	// a typing indicator to the sender. It is best-effort; callers may ignore
@@ -171,6 +189,10 @@ func buildSendPayload(to, text string) []byte {
 
 // doSend executes req, checks the HTTP status, and extracts the wamid.
 // req must already have Content-Type and auth headers set.
+//
+// On non-200 responses it parses the standard Meta-style error envelope and,
+// if the error code matches the 24-hour-window rejection (131047), wraps
+// ErrWindowClosed so the caller can branch on errors.Is(err, ErrWindowClosed).
 func doSend(req *http.Request) (string, error) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -180,6 +202,9 @@ func doSend(req *http.Request) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if isWindowClosedError(body) {
+			return "", fmt.Errorf("%w: %s", ErrWindowClosed, string(body))
+		}
 		return "", fmt.Errorf("provider API %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -193,6 +218,81 @@ func doSend(req *http.Request) (string, error) {
 	return result.Messages[0].ID, nil
 }
 
+// errorEnvelope models the standard Meta Cloud API / 360dialog error response.
+// Both providers return this shape; only the transport differs.
+type errorEnvelope struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// isWindowClosedError reports whether body is a Meta-style error response with
+// code 131047. It tolerates trailing data and missing fields.
+func isWindowClosedError(body []byte) bool {
+	var env errorEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.Code == windowClosedCode
+}
+
+// -------------------------------------------------------------------------
+// Template message payload (used for the re-engagement notification template)
+// -------------------------------------------------------------------------
+
+// TemplateComponent is one variable-bearing slot in a template message —
+// either a body section or a button.
+type TemplateComponent struct {
+	Type       string              `json:"type"`               // "body" | "button" | "header"
+	SubType    string              `json:"sub_type,omitempty"` // for button: "quick_reply" | "url"
+	Index      string              `json:"index,omitempty"`    // for button: "0", "1", ...
+	Parameters []TemplateParameter `json:"parameters,omitempty"`
+}
+
+// TemplateParameter is one filled value inside a TemplateComponent.
+type TemplateParameter struct {
+	Type    string `json:"type"`              // "text" | "payload"
+	Text    string `json:"text,omitempty"`
+	Payload string `json:"payload,omitempty"`
+}
+
+type sendTemplatePayload struct {
+	MessagingProduct string          `json:"messaging_product"`
+	RecipientType    string          `json:"recipient_type"`
+	To               string          `json:"to"`
+	Type             string          `json:"type"`
+	Template         templateBody    `json:"template"`
+}
+
+type templateBody struct {
+	Name       string              `json:"name"`
+	Language   templateLanguage    `json:"language"`
+	Components []TemplateComponent `json:"components,omitempty"`
+}
+
+type templateLanguage struct {
+	Code string `json:"code"`
+}
+
+// buildTemplatePayload encodes a Cloud API template message body.
+// components may be nil for a static-body template with no variables (the
+// re-engagement template `smart_session_20260521` is one such case).
+func buildTemplatePayload(to, name, lang string, components []TemplateComponent) []byte {
+	b, _ := json.Marshal(sendTemplatePayload{
+		MessagingProduct: "whatsapp",
+		RecipientType:    "individual",
+		To:               to,
+		Type:             "template",
+		Template: templateBody{
+			Name:       name,
+			Language:   templateLanguage{Code: lang},
+			Components: components,
+		},
+	})
+	return b
+}
+
 // -------------------------------------------------------------------------
 // Stub provider (dev / no-credentials mode)
 // -------------------------------------------------------------------------
@@ -204,6 +304,10 @@ func (s *stubProvider) SendText(_ context.Context, _, _ string) (string, error) 
 }
 
 func (s *stubProvider) SendMedia(_ context.Context, _, _, _, _, _ string) (string, error) {
+	return "wamid." + uuid.NewString(), nil
+}
+
+func (s *stubProvider) SendTemplate(_ context.Context, _, _, _ string, _ []TemplateComponent) (string, error) {
 	return "wamid." + uuid.NewString(), nil
 }
 

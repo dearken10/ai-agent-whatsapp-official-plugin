@@ -30,6 +30,9 @@ type fileStore struct {
 	invites  []*PersistentInvite
 	pairReqs map[string][]time.Time
 
+	// templateThrottle: map[templateThrottleKey(wab, phone, template)] = last_sent_at
+	templateThrottle map[string]time.Time
+
 	// secondary indexes rebuilt on load / mutated in-place
 	byCode          map[string]*PairingRecord
 	byPhone         map[string]*PairingRecord
@@ -41,9 +44,10 @@ type fileStore struct {
 
 // fileData is the on-disk JSON shape.
 type fileData struct {
-	Records      []*PairingRecord       `json:"records"`
-	Invites      []*PersistentInvite    `json:"invites,omitempty"`
-	PairRequests map[string][]time.Time `json:"pairRequests"`
+	Records          []*PairingRecord       `json:"records"`
+	Invites          []*PersistentInvite    `json:"invites,omitempty"`
+	PairRequests     map[string][]time.Time `json:"pairRequests"`
+	TemplateThrottle map[string]time.Time   `json:"templateThrottle,omitempty"`
 }
 
 // NewFile opens (or creates) a JSON store at path.
@@ -53,14 +57,15 @@ func NewFile(path string) (*fileStore, error) {
 	}
 
 	fs := &fileStore{
-		path:           path,
-		byCode:         map[string]*PairingRecord{},
-		byPhone:        map[string]*PairingRecord{},
-		byAPIKey:       map[string]*PairingRecord{},
-		byInviteID:     map[string]*PersistentInvite{},
-		byInviteCode:   map[string]*PersistentInvite{},
-		byInviteAPIKey: map[string]*PersistentInvite{},
-		pairReqs:       map[string][]time.Time{},
+		path:             path,
+		byCode:           map[string]*PairingRecord{},
+		byPhone:          map[string]*PairingRecord{},
+		byAPIKey:         map[string]*PairingRecord{},
+		byInviteID:       map[string]*PersistentInvite{},
+		byInviteCode:     map[string]*PersistentInvite{},
+		byInviteAPIKey:   map[string]*PersistentInvite{},
+		pairReqs:         map[string][]time.Time{},
+		templateThrottle: map[string]time.Time{},
 	}
 
 	data, err := os.ReadFile(path)
@@ -76,6 +81,9 @@ func NewFile(path string) (*fileStore, error) {
 		fs.invites = fd.Invites
 		if fd.PairRequests != nil {
 			fs.pairReqs = fd.PairRequests
+		}
+		if fd.TemplateThrottle != nil {
+			fs.templateThrottle = fd.TemplateThrottle
 		}
 		fs.rebuildIndexes()
 	}
@@ -121,9 +129,10 @@ func (fs *fileStore) rebuildIndexes() {
 // Must be called with the write lock held.
 func (fs *fileStore) flush() error {
 	fd := fileData{
-		Records:      fs.records,
-		Invites:      fs.invites,
-		PairRequests: fs.pairReqs,
+		Records:          fs.records,
+		Invites:          fs.invites,
+		PairRequests:     fs.pairReqs,
+		TemplateThrottle: fs.templateThrottle,
 	}
 	data, err := json.MarshalIndent(fd, "", "  ")
 	if err != nil {
@@ -301,6 +310,23 @@ func (fs *fileStore) TrackPairRequest(clientIP string, now time.Time, limit int)
 	filtered = append(filtered, now)
 	fs.pairReqs[clientIP] = filtered
 	return true, fs.flush()
+}
+
+func (fs *fileStore) WasTemplateSentRecently(wab, phone, template string, within time.Duration, now time.Time) (bool, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	last, ok := fs.templateThrottle[templateThrottleKey(wab, phone, template)]
+	if !ok {
+		return false, nil
+	}
+	return now.Sub(last) < within, nil
+}
+
+func (fs *fileStore) MarkTemplateSent(wab, phone, template string, now time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.templateThrottle[templateThrottleKey(wab, phone, template)] = now
+	return fs.flush()
 }
 
 func (fs *fileStore) Close() error {

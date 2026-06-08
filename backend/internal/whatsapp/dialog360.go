@@ -182,3 +182,18 @@ func (p *dialog360Provider) SendText(ctx context.Context, to, text string) (stri
 	req.Header.Set("D360-API-KEY", p.apiKey)
 	return doSend(req)
 }
+
+// SendTemplate sends an approved template message via 360dialog.
+// Payload shape verified 2026-06-01 against the dev WABA `+18064509684`
+// using `smart_session_20260521` (lang `en`) — provider returned HTTP 200
+// with message_status=accepted.
+func (p *dialog360Provider) SendTemplate(ctx context.Context, to, name, lang string, components []TemplateComponent) (string, error) {
+	url := p.baseURL + "/messages"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buildTemplatePayload(to, name, lang, components)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("D360-API-KEY", p.apiKey)
+	return doSend(req)
+}

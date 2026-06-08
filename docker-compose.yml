@@ -18,6 +18,13 @@ services:
       WABA_PHONE_NUMBER_ID: "${WABA_PHONE_NUMBER_ID:-}"
       D360_API_KEY: "${D360_API_KEY:-}"
       D360_BASE_URL: "${D360_BASE_URL:-}"
+      REENGAGEMENT_TEMPLATE_NAME: "${REENGAGEMENT_TEMPLATE_NAME:-}"
+      REENGAGEMENT_TEMPLATE_LANG: "${REENGAGEMENT_TEMPLATE_LANG:-}"
+      REENGAGEMENT_BUTTON_PAYLOAD: "${REENGAGEMENT_BUTTON_PAYLOAD:-}"
+      TEMPLATE_THROTTLE_HOURS: "${TEMPLATE_THROTTLE_HOURS:-}"
+      STORE_FILE_PATH: "${STORE_FILE_PATH:-/data/store.db}"
+    volumes:
+      - ./backend/data:/data
     ports:
       # Host port avoids clashing with other services on 8080
       - "28080:8080"

@@ -46,17 +46,31 @@ Each turn is a fresh `claude` process — but Claude Code treats them as a singl
 
 ## Prerequisites
 
-1. **Claude Code CLI installed and authenticated** on this machine. Run `claude` once interactively to log in. The bridge inherits the same auth.
-2. **`ROUTING_API_KEY`** from pairing — see `npm run pair`.
+1. **Node.js ≥ 22.6** (uses `--experimental-strip-types` to run TypeScript directly).
+2. **Claude Code CLI installed and authenticated** on this machine. Run `claude` once interactively to log in. The bridge inherits the same auth.
+3. **`ROUTING_API_KEY`** from pairing — produced by the setup flow below.
 
 ## Quick start
+
+From npm (no clone required):
+
+```bash
+npx claude-whatsapp-official-plugin setup   # pairs WhatsApp, writes .env, then starts the bridge
+```
+
+Re-running the bridge later, after first-time setup:
+
+```bash
+npx claude-whatsapp-official-plugin start
+```
+
+Or from a checkout of this repo:
 
 ```bash
 cd claude-plugin
 npm run setup     # installs deps, pairs WhatsApp, writes .env, then starts the bridge
+npm start         # subsequent runs
 ```
-
-(Re-running the bridge later, after the first-time setup: just `npm start`.)
 
 The setup flow mirrors `openclaw-plugin/src/onboarding.ts`:
 
@@ -71,7 +85,11 @@ Once setup finishes, the bridge launches automatically and forwards every inboun
 
 ### Headless alternative
 
-If you just want the apiKey without the interactive flow (e.g. scripting), `npm run pair` is the minimal version: it prints the pairing code, prints the apiKey, and exits when `PAIRING_COMPLETE` arrives. You then fill `.env` yourself.
+If you just want the apiKey without the interactive flow (e.g. scripting), the `pair` command is the minimal version: it prints the pairing code, prints the apiKey, and exits when `PAIRING_COMPLETE` arrives. You then fill `.env` yourself.
+
+```bash
+npx claude-whatsapp-official-plugin pair    # or: npm run pair (from a checkout)
+```
 
 ## Files
 

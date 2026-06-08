@@ -1,16 +1,35 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import type { ChannelGatewayContext, OpenClawConfig } from "openclaw/plugin-sdk";
 import { handleWhatsappOfficialInbound } from "./inbound.js";
 import { PLUGIN_ID } from "./constants.js";
 import type { ResolvedWhatsappOfficialAccount } from "./types.js";
+import { Buffer } from "./buffer.js";
+import { flushPending, LOCAL_WAB, setActiveBuffer } from "./transport.js";
 
 type WsEnvelope = {
-  type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "HEARTBEAT" | "ERROR";
+  type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "WINDOW_OPENED" | "HEARTBEAT" | "ERROR";
   payload: Record<string, unknown>;
   timestamp: string;
   message_id: string;
 };
+
+function bufferConfigFor(accountId: string): { dir: string; maxPerPhone: number; ttlMs: number } {
+  const dir = process.env.WA_BUFFER_DIR ?? join(homedir(), ".openclaw-whatsapp-buffer", accountId);
+  const intEnv = (k: string, def: number): number => {
+    const raw = process.env[k];
+    if (!raw) return def;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : def;
+  };
+  return {
+    dir,
+    maxPerPhone: intEnv("WA_BUFFER_MAX_PER_PHONE", 50),
+    ttlMs: intEnv("WA_BUFFER_TTL_HOURS", 72) * 3600_000,
+  };
+}
 
 function wsUrlFromHttpBase(base: string): string {
   if (base.startsWith("https://")) {
@@ -51,6 +70,21 @@ export async function startWhatsappOfficialGatewayAccount(
     configured: true,
   });
 
+  // Initialise plugin-local outbound buffer (24h window handling).
+  // Bodies live ONLY on disk under WA_BUFFER_DIR; the routing server never
+  // sees buffered content again until flush. See docs/prd/24h-window-and-buffering.md.
+  const buffer = new Buffer(bufferConfigFor(account.accountId));
+  setActiveBuffer(buffer);
+  const sweepMin = Number.parseInt(process.env.WA_BUFFER_SWEEP_INTERVAL_MIN ?? "15", 10) || 15;
+  const sweeper = setInterval(() => {
+    void buffer.sweepExpired().then((n) => {
+      if (n > 0) ctx.log?.info(`${PLUGIN_ID}: buffer.expired removed=${n}`);
+    }).catch((err) => {
+      ctx.log?.warn(`${PLUGIN_ID}: buffer sweep failed: ${String(err)}`);
+    });
+  }, sweepMin * 60_000);
+  sweeper.unref?.();
+
   let attempt = 0;
   try {
     while (!ctx.abortSignal.aborted) {
@@ -80,6 +114,22 @@ export async function startWhatsappOfficialGatewayAccount(
               ws.ping();
             }
           }, 30_000);
+          // Try to drain any buffer that survived a previous session. The
+          // server-side template_throttle prevents duplicate billable template
+          // sends, so calling flush on a still-closed window is safe.
+          void (async () => {
+            try {
+              const pairs = await buffer.enumeratePending();
+              if (pairs.length === 0) return;
+              ctx.log?.info(`${PLUGIN_ID}: startup flush ${pairs.length} pair(s)`);
+              for (const { wab, phone } of pairs) {
+                const r = await flushPending({ cfg: ctx.cfg as OpenClawConfig, accountId: account.accountId, buffer, wab, phone });
+                ctx.log?.info(`${PLUGIN_ID}: startup flush phone=${phone} delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+              }
+            } catch (err) {
+              ctx.log?.warn(`${PLUGIN_ID}: startup flush error: ${String(err)}`);
+            }
+          })();
         });
 
         ws.on("message", async (raw) => {
@@ -92,10 +142,26 @@ export async function startWhatsappOfficialGatewayAccount(
               ctx.log?.info(`${PLUGIN_ID}: pairing complete phone=${phone} mode=${mode}${inviteId}`);
               return;
             }
+            if (envelope.type === "WINDOW_OPENED") {
+              const phone = String(envelope.payload.phone ?? "");
+              if (!phone) return;
+              ctx.log?.info(`${PLUGIN_ID}: WINDOW_OPENED phone=${phone}; flushing`);
+              const r = await flushPending({ cfg: ctx.cfg as OpenClawConfig, accountId: account.accountId, buffer, wab: LOCAL_WAB, phone });
+              ctx.log?.info(`${PLUGIN_ID}: flush delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+              return;
+            }
             if (envelope.type !== "INBOUND_MESSAGE") {
               return;
             }
             const from = String(envelope.payload.from ?? "");
+            // Flush any buffered backlog BEFORE handing the inbound to the
+            // agent so the user sees prior context first.
+            if (from) {
+              const r = await flushPending({ cfg: ctx.cfg as OpenClawConfig, accountId: account.accountId, buffer, wab: LOCAL_WAB, phone: from });
+              if (r.delivered > 0) {
+                ctx.log?.info(`${PLUGIN_ID}: pre-dispatch flush delivered=${r.delivered} remaining=${r.remaining}`);
+              }
+            }
             const text = String(envelope.payload.text ?? "");
             const messageId = envelope.message_id || String(envelope.payload.messageId ?? "");
             const mediaId = String(envelope.payload.mediaId ?? "");
@@ -149,6 +215,8 @@ export async function startWhatsappOfficialGatewayAccount(
       }
     }
   } finally {
+    clearInterval(sweeper);
+    setActiveBuffer(undefined);
     ctx.setStatus({
       accountId: account.accountId,
       running: false,
