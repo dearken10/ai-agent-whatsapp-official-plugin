@@ -43,6 +43,14 @@ type Provider interface {
 	// caption and filename are optional (filename is only used for documents).
 	SendMedia(ctx context.Context, to, mediaType, mediaURL, caption, filename string) (messageID string, err error)
 
+	// SendFileMedia uploads raw media bytes to the provider's media storage
+	// and sends a message referencing that uploaded media. Avoids the need
+	// for a publicly reachable URL.
+	// mediaType must be one of: "image", "video", "audio", "document".
+	// mimeType is the file's Content-Type (e.g. "text/csv", "image/jpeg").
+	// caption and filename are optional (filename only used for documents).
+	SendFileMedia(ctx context.Context, to, mediaType, mimeType, filename string, data []byte, caption string) (messageID string, err error)
+
 	// DownloadMedia fetches the raw bytes and MIME type for a received media
 	// object. mediaID is the provider-specific identifier. directURL, if
 	// non-empty, is the pre-resolved download URL from the webhook payload and
@@ -123,18 +131,23 @@ type sendMediaPayload struct {
 }
 
 type mediaLink struct {
-	Link    string `json:"link"`
+	Link    string `json:"link,omitempty"`
+	ID      string `json:"id,omitempty"`
 	Caption string `json:"caption,omitempty"`
 }
 
 type docLink struct {
-	Link     string `json:"link"`
+	Link     string `json:"link,omitempty"`
+	ID       string `json:"id,omitempty"`
 	Caption  string `json:"caption,omitempty"`
 	Filename string `json:"filename,omitempty"`
 }
 
 // buildMediaPayload encodes the standard WhatsApp media message body.
-func buildMediaPayload(to, mediaType, mediaURL, caption, filename string) []byte {
+// Exactly one of mediaURL or mediaID should be set; the other empty.
+// When mediaID is set, the message references an already-uploaded media
+// resource by id instead of a public URL.
+func buildMediaPayload(to, mediaType, mediaURL, mediaID, caption, filename string) []byte {
 	p := sendMediaPayload{
 		MessagingProduct: "whatsapp",
 		RecipientType:    "individual",
@@ -143,13 +156,13 @@ func buildMediaPayload(to, mediaType, mediaURL, caption, filename string) []byte
 	}
 	switch mediaType {
 	case "document":
-		p.Document = &docLink{Link: mediaURL, Caption: caption, Filename: filename}
+		p.Document = &docLink{Link: mediaURL, ID: mediaID, Caption: caption, Filename: filename}
 	case "image":
-		p.Image = &mediaLink{Link: mediaURL, Caption: caption}
+		p.Image = &mediaLink{Link: mediaURL, ID: mediaID, Caption: caption}
 	case "video":
-		p.Video = &mediaLink{Link: mediaURL, Caption: caption}
+		p.Video = &mediaLink{Link: mediaURL, ID: mediaID, Caption: caption}
 	case "audio":
-		p.Audio = &mediaLink{Link: mediaURL}
+		p.Audio = &mediaLink{Link: mediaURL, ID: mediaID}
 	}
 	b, _ := json.Marshal(p)
 	return b
@@ -304,6 +317,10 @@ func (s *stubProvider) SendText(_ context.Context, _, _ string) (string, error) 
 }
 
 func (s *stubProvider) SendMedia(_ context.Context, _, _, _, _, _ string) (string, error) {
+	return "wamid." + uuid.NewString(), nil
+}
+
+func (s *stubProvider) SendFileMedia(_ context.Context, _, _, _, _ string, _ []byte, _ string) (string, error) {
 	return "wamid." + uuid.NewString(), nil
 }
 

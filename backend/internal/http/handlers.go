@@ -111,6 +111,7 @@ func (s *Server) Router() *mux.Router {
 	r.HandleFunc("/api/v1/pair/invite/{inviteId}", s.handleInviteDelete).Methods(http.MethodDelete)
 	r.HandleFunc("/api/v1/pair/status", s.handlePairStatus).Methods(http.MethodGet)
 	r.HandleFunc("/api/v1/send", s.handleSend).Methods(http.MethodPost)
+	r.HandleFunc("/api/v1/send-media", s.handleSendMedia).Methods(http.MethodPost)
 	r.HandleFunc("/api/v1/typing", s.handleTyping).Methods(http.MethodPost)
 	r.HandleFunc("/api/v1/media/{mediaId}", s.handleMediaDownload).Methods(http.MethodGet)
 	r.HandleFunc("/webhooks/whatsapp", s.handleWebhookVerify).Methods(http.MethodGet)
@@ -392,6 +393,107 @@ func (s *Server) dispatchReengagementTemplate(ctx context.Context, wab, phone st
 	}
 	log.Printf("[template] sent wab=%s phone=%s template=%s", wab, maskPhone(phone), template)
 	return true
+}
+
+// handleSendMedia accepts a multipart upload and forwards the file to the
+// underlying provider via SendFileMedia (no public URL required).
+//
+// Form fields (multipart/form-data):
+//   - toPhoneNumber  (required) — E.164 without '+'
+//   - file           (required) — the file to send
+//   - mediaType      (optional) — "document" (default), "image", "video", "audio"
+//   - caption        (optional) — visible caption (documents/images/videos)
+//   - mimeType       (optional) — overrides the inferred Content-Type
+//   - fileName       (optional) — overrides the uploaded filename
+func (s *Server) handleSendMedia(w http.ResponseWriter, r *http.Request) {
+	apiKey := bearerToken(r.Header.Get("Authorization"))
+	if apiKey == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
+		return
+	}
+
+	// Cap upload size at 32 MB. WhatsApp's hard limit is 100 MB for documents
+	// but 32 MB is a sane default that covers receipts, CSVs, small PDFs.
+	const maxUpload = 32 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
+	if err := r.ParseMultipartForm(maxUpload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse failed: " + err.Error()})
+		return
+	}
+
+	to := strings.TrimSpace(r.FormValue("toPhoneNumber"))
+	if to == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "toPhoneNumber is required"})
+		return
+	}
+	mediaType := r.FormValue("mediaType")
+	if mediaType == "" {
+		mediaType = "document"
+	}
+	switch mediaType {
+	case "document", "image", "video", "audio":
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mediaType must be one of: document, image, video, audio"})
+		return
+	}
+	caption := r.FormValue("caption")
+	overrideMime := r.FormValue("mimeType")
+	overrideName := r.FormValue("fileName")
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field is required: " + err.Error()})
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read file failed: " + err.Error()})
+		return
+	}
+	mimeType := overrideMime
+	if mimeType == "" {
+		if ct := header.Header.Get("Content-Type"); ct != "" {
+			mimeType = ct
+		} else {
+			mimeType = http.DetectContentType(data)
+		}
+	}
+	filename := overrideName
+	if filename == "" {
+		filename = header.Filename
+	}
+
+	// Validate that the target phone is actively paired via this API key.
+	targetRecord, ok := s.cache.getByPhone(to)
+	if !ok {
+		targetRecord, ok, err = s.store.FindByPhone(to)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store error"})
+			return
+		}
+		if ok {
+			s.cache.set(targetRecord)
+		}
+	}
+	if !ok || targetRecord.Status != store.StatusActive {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target not paired or inactive"})
+		return
+	}
+	if targetRecord.APIKey != apiKey {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target mismatch: phone not paired to this instance"})
+		return
+	}
+
+	messageID, sendErr := s.waProvider.SendFileMedia(r.Context(), to, mediaType, mimeType, filename, data, caption)
+	if sendErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed: " + sendErr.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":    "accepted",
+		"messageId": messageID,
+	})
 }
 
 func (s *Server) handleTyping(w http.ResponseWriter, r *http.Request) {
