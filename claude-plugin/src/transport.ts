@@ -1,6 +1,11 @@
 import type { Config } from "./config.ts";
 import type { Buffer, BufferedMessage } from "./buffer.ts";
 
+// transport only ever reads routingBaseUrl + routingApiKey from cfg. Narrow the
+// surface area so callers like the send-wa CLI can synthesise just these two
+// fields without manufacturing a fake Config.
+type RoutingCfg = Pick<Config, "routingBaseUrl" | "routingApiKey">;
+
 // Local sentinel wab: the plugin only ever talks to one WABA, so we don't
 // need to track the real wab number client-side. The buffer dir uses this
 // constant as the per-wab partition. WS messages from the server may include
@@ -18,7 +23,7 @@ type SendResponse =
   | { error?: string };
 
 async function postSend(
-  cfg: Config,
+  cfg: RoutingCfg,
   body: { toPhoneNumber: string; text?: string; mediaUrl?: string; mediaType?: string; caption?: string; fileName?: string },
 ): Promise<SendResponse> {
   const response = await fetch(`${cfg.routingBaseUrl}/api/v1/send`, {
@@ -48,7 +53,7 @@ async function postSend(
 // Returns the outcome so the caller can log, but never throws on window-closed
 // — the agent treats `queued` as success and moves on.
 export async function sendOutboundText(
-  cfg: Config,
+  cfg: RoutingCfg,
   to: string,
   text: string,
   buffer?: Buffer,
@@ -82,7 +87,7 @@ export async function sendOutboundText(
 // response or transient error pauses the flush so the remaining entries
 // stay queued for the next inbound trigger.
 export async function flushPending(
-  cfg: Config,
+  cfg: RoutingCfg,
   buffer: Buffer,
   wab: string,
   phone: string,
@@ -129,7 +134,7 @@ function sendBodyFromBuffered(m: BufferedMessage): {
   };
 }
 
-export async function sendTypingIndicator(cfg: Config, messageId: string): Promise<void> {
+export async function sendTypingIndicator(cfg: RoutingCfg, messageId: string): Promise<void> {
   await fetch(`${cfg.routingBaseUrl}/api/v1/typing`, {
     method: "POST",
     headers: {
@@ -152,7 +157,7 @@ export async function sendTypingIndicator(cfg: Config, messageId: string): Promi
 const TYPING_REFRESH_MS = 26_000;
 
 export function startTypingHeartbeat(
-  cfg: Config,
+  cfg: RoutingCfg,
   messageId: string,
 ): { ping: () => void; stop: () => Promise<void> } {
   let stopped = false;
@@ -174,7 +179,7 @@ export function startTypingHeartbeat(
 }
 
 export async function fetchMedia(
-  cfg: Config,
+  cfg: RoutingCfg,
   mediaId: string,
   directUrl?: string,
 ): Promise<{ data: Uint8Array; mimeType: string }> {

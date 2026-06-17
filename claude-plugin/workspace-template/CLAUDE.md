@@ -24,15 +24,26 @@ The bridge pre-exports three environment variables:
 
 ### Send a text message
 
+Use the `./send-wa` shim in this workspace. It handles the
+`status: "window_closed"` case correctly and, when the 24-hour customer-service
+window has closed, persists the message to the plugin's local buffer so it
+flushes automatically the next time the user replies on WhatsApp.
+
 ```bash
-curl -sX POST "$ROUTING_BASE_URL/api/v1/send" \
-  -H "Authorization: Bearer $ROUTING_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -nc --arg to "$USER_PHONE" --arg text "your message here" \
-        '{toPhoneNumber: $to, text: $text}')"
+./send-wa "your message here"
 ```
 
-A 200 means accepted. The response body has a `messageId`.
+Exit codes:
+
+| Code | Meaning                                                                     |
+|------|-----------------------------------------------------------------------------|
+| 0    | Delivered. `messageId=…` printed to stdout.                                 |
+| 2    | NOT delivered now — 24h window closed; queued in plugin buffer, flushes on next inbound. |
+| 1    | Hard failure (bad env, network, unexpected backend response).               |
+
+Cron jobs and async scripts MUST use `./send-wa` (or the same JSON-aware
+logic). A bare `curl` that only checks HTTP code silently treats
+`window_closed` responses as success and loses messages.
 
 ### Rules
 

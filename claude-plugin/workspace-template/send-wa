@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Push a WhatsApp message to the paired user via the routing backend.
+# Buffer-aware: if the 24h customer-service window has closed, the message
+# is persisted to the plugin's local buffer and flushes automatically when
+# the user next replies on WhatsApp.
+#
+# Usage: ./send-wa "your message"
+# Exit:   0 = delivered, 2 = queued (window_closed), 1 = error.
+
+set -euo pipefail
+
+if [[ -z "${CLAUDE_PLUGIN_DIR:-}" ]]; then
+  echo "send-wa: CLAUDE_PLUGIN_DIR not set (this script must run inside a claude-plugin workspace)" >&2
+  exit 1
+fi
+
+exec node --experimental-strip-types "$CLAUDE_PLUGIN_DIR/src/cli/send-wa.ts" "$@"

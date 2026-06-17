@@ -7,6 +7,7 @@ import {
   appendFile,
   chmod,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -61,6 +62,51 @@ function runSerial<T>(wab: string, phone: string, fn: () => Promise<T>): Promise
     }),
   );
   return next as Promise<T>;
+}
+
+// Cross-process lock for the per-(wab, phone) jsonl. runSerial above serialises
+// in-process callers; this lock keeps a second Node process (e.g. the send-wa
+// CLI invoked from a Claude skill) from racing the main plugin's flush.
+// Implementation: O_EXCL create of a sidecar `.lock` file is atomic on POSIX.
+// Stale locks (process crashed mid-operation) are reclaimed after LOCK_STALE_MS.
+const LOCK_STALE_MS = 30_000;
+const LOCK_MAX_WAIT_MS = 5_000;
+
+async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = `${file}.lock`;
+  await ensureDir(dirname(lockPath));
+  const start = Date.now();
+  let backoff = 25;
+  for (;;) {
+    let fh;
+    try {
+      fh = await open(lockPath, "wx", 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        const st = await stat(lockPath);
+        if (Date.now() - st.mtime.getTime() > LOCK_STALE_MS) {
+          await unlink(lockPath).catch(() => undefined);
+          continue;
+        }
+      } catch {
+        // Lock vanished between EEXIST and stat — retry immediately.
+        continue;
+      }
+      if (Date.now() - start > LOCK_MAX_WAIT_MS) {
+        throw new Error(`buffer lock timeout: ${lockPath}`);
+      }
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, 250);
+      continue;
+    }
+    try {
+      return await fn();
+    } finally {
+      await fh.close().catch(() => undefined);
+      await unlink(lockPath).catch(() => undefined);
+    }
+  }
 }
 
 function fileFor(cfg: BufferConfig, wab: string, phone: string): string {
@@ -134,8 +180,8 @@ export class Buffer {
       attempts: msg.attempts ?? 0,
       ...msg,
     } as BufferedMessage;
-    return runSerial(full.wab, full.phone, async () => {
-      const file = fileFor(this.cfg, full.wab, full.phone);
+    const file = fileFor(this.cfg, full.wab, full.phone);
+    return runSerial(full.wab, full.phone, () => withFileLock(file, async () => {
       const existing = await readAll(file);
       existing.push(full);
       // Enforce cap: drop oldest while above limit.
@@ -144,23 +190,25 @@ export class Buffer {
       }
       await writeAll(file, existing);
       return full;
-    });
+    }));
   }
 
   async hasPending(wab: string, phone: string): Promise<boolean> {
-    return runSerial(wab, phone, async () => {
-      const msgs = await readAll(fileFor(this.cfg, wab, phone));
+    const file = fileFor(this.cfg, wab, phone);
+    return runSerial(wab, phone, () => withFileLock(file, async () => {
+      const msgs = await readAll(file);
       return msgs.length > 0;
-    });
+    }));
   }
 
   async listPending(wab: string, phone: string): Promise<BufferedMessage[]> {
-    return runSerial(wab, phone, async () => {
-      const msgs = await readAll(fileFor(this.cfg, wab, phone));
+    const file = fileFor(this.cfg, wab, phone);
+    return runSerial(wab, phone, () => withFileLock(file, async () => {
+      const msgs = await readAll(file);
       // Oldest first.
       msgs.sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt));
       return msgs;
-    });
+    }));
   }
 
   // enumeratePending walks the buffer dir for every (wab, phone) that has
@@ -191,17 +239,17 @@ export class Buffer {
   }
 
   async markDelivered(wab: string, phone: string, id: string): Promise<void> {
-    return runSerial(wab, phone, async () => {
-      const file = fileFor(this.cfg, wab, phone);
+    const file = fileFor(this.cfg, wab, phone);
+    return runSerial(wab, phone, () => withFileLock(file, async () => {
       const msgs = await readAll(file);
       const remaining = msgs.filter((m) => m.id !== id);
       await writeAll(file, remaining);
-    });
+    }));
   }
 
   async recordFailure(wab: string, phone: string, id: string, err: string): Promise<void> {
-    return runSerial(wab, phone, async () => {
-      const file = fileFor(this.cfg, wab, phone);
+    const file = fileFor(this.cfg, wab, phone);
+    return runSerial(wab, phone, () => withFileLock(file, async () => {
       const msgs = await readAll(file);
       for (const m of msgs) {
         if (m.id === id) {
@@ -210,7 +258,7 @@ export class Buffer {
         }
       }
       await writeAll(file, msgs);
-    });
+    }));
   }
 
   // sweepExpired removes entries older than cfg.ttlMs across all phones.
@@ -219,8 +267,8 @@ export class Buffer {
     const cutoff = now.getTime() - this.cfg.ttlMs;
     let removed = 0;
     for (const { wab, phone } of await this.enumeratePending()) {
-      await runSerial(wab, phone, async () => {
-        const file = fileFor(this.cfg, wab, phone);
+      const file = fileFor(this.cfg, wab, phone);
+      await runSerial(wab, phone, () => withFileLock(file, async () => {
         const msgs = await readAll(file);
         const keep = msgs.filter((m) => {
           const t = Date.parse(m.enqueuedAt);
@@ -234,19 +282,19 @@ export class Buffer {
         if (keep.length !== msgs.length) {
           await writeAll(file, keep);
         }
-      });
+      }));
     }
     return removed;
   }
 
   // clear is a convenience for tests / unpair cleanup.
   async clear(wab: string, phone: string): Promise<void> {
-    return runSerial(wab, phone, async () => {
-      const file = fileFor(this.cfg, wab, phone);
+    const file = fileFor(this.cfg, wab, phone);
+    return runSerial(wab, phone, () => withFileLock(file, async () => {
       await unlink(file).catch((err: NodeJS.ErrnoException) => {
         if (err.code !== "ENOENT") throw err;
       });
-    });
+    }));
   }
 
   // Used only by tests.

@@ -4,6 +4,9 @@
 node_modules/
 tmp/
 .claude/
+# but ship the template's .claude (skills get seeded into each workspace)
+!claude-plugin/workspace-template/.claude/
+!claude-plugin/workspace-template/.claude/**
 
 # backend runtime state (sqlite files)
 backend/data/

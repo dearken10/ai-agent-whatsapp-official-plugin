@@ -1,18 +1,19 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import type { SessionStore } from "./session-store.ts";
 
+// Plugin install root (parent of src/). The workspace's send-wa shim shells
+// into "$CLAUDE_PLUGIN_DIR/src/cli/send-wa.ts", so the shim only needs this
+// one env var to locate the CLI.
+const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
 // Template files copied into each new per-user workspace. Lives next to
 // src/ in the package layout (see claude-plugin/workspace-template/).
-const TEMPLATE_DIR = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "workspace-template",
-);
+const TEMPLATE_DIR = resolve(PLUGIN_ROOT, "workspace-template");
 
 async function pathExists(p: string): Promise<boolean> {
   try {
@@ -49,14 +50,28 @@ async function copyTemplate(
       const raw = await readFile(srcPath, "utf8");
       const rendered = raw.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? `{{${k}}}`);
       await writeFile(dstPath, rendered);
+      // Preserve execute bit for shell shims (e.g. send-wa). writeFile drops
+      // the source mode, so detect a shebang in the first line.
+      if (rendered.startsWith("#!")) {
+        await chmod(dstPath, 0o755).catch(() => undefined);
+      }
     }
   }
 }
 
-function claudeEnv(phone: string): NodeJS.ProcessEnv {
+function claudeEnv(cfg: Config, phone: string): NodeJS.ProcessEnv {
   // USER_PHONE is what the workspace's CLAUDE.md / notify-user skill expect.
   // ROUTING_BASE_URL and ROUTING_API_KEY are already in process.env from .env.
-  return { ...process.env, USER_PHONE: phone };
+  // CLAUDE_PLUGIN_DIR + WA_BUFFER_DIR let the send-wa shim locate and share
+  // the plugin's buffer for window_closed messages.
+  return {
+    ...process.env,
+    USER_PHONE: phone,
+    CLAUDE_PLUGIN_DIR: PLUGIN_ROOT,
+    WA_BUFFER_DIR: cfg.waBufferDir,
+    WA_BUFFER_MAX_PER_PHONE: String(cfg.waBufferMaxPerPhone),
+    WA_BUFFER_TTL_HOURS: String(cfg.waBufferTtlHours),
+  };
 }
 
 export type ClaudeReply = {
@@ -126,7 +141,7 @@ export async function dispatchToClaude(
   if (cfg.maxTurns) args.push("--max-turns", String(cfg.maxTurns));
 
   console.log(`claude turn phone=${phone} cwd=${cwd} resume=${resume ?? "(none)"}`);
-  const stdout = await runClaude(cfg.claudeBin, cwd, args, claudeEnv(phone));
+  const stdout = await runClaude(cfg.claudeBin, cwd, args, claudeEnv(cfg, phone));
   let parsed: ClaudeResult;
   try {
     parsed = JSON.parse(stdout) as ClaudeResult;
@@ -180,7 +195,7 @@ export async function dispatchToClaudeStream(
   const child = spawn(cfg.claudeBin, args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env: claudeEnv(phone),
+    env: claudeEnv(cfg, phone),
   });
 
   let stderr = "";
