@@ -6,12 +6,36 @@
 #
 # Usage: ./send-wa "your message"
 # Exit:   0 = delivered, 2 = queued (window_closed), 1 = error.
+#
+# Works both inside a claude turn (env pre-exported by claude-plugin) and
+# from cron / one-shot scripts (env recovered from filesystem layout).
 
 set -euo pipefail
 
+# Locate the plugin install. Shim lives at <plugin>/workspaces/<phone>/send-wa,
+# so up two dirs is the plugin root.
 if [[ -z "${CLAUDE_PLUGIN_DIR:-}" ]]; then
-  echo "send-wa: CLAUDE_PLUGIN_DIR not set (this script must run inside a claude-plugin workspace)" >&2
+  CLAUDE_PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
+fi
+export CLAUDE_PLUGIN_DIR
+
+CLI="$CLAUDE_PLUGIN_DIR/src/cli/send-wa.ts"
+if [[ ! -f "$CLI" ]]; then
+  echo "send-wa: CLI not found at $CLI" >&2
   exit 1
 fi
 
-exec node --experimental-strip-types "$CLAUDE_PLUGIN_DIR/src/cli/send-wa.ts" "$@"
+# Align the buffer dir with the running plugin. The plugin defaults
+# WA_BUFFER_DIR to <workspaceRoot>/wa-buffer with workspaceRoot resolved at
+# its own cwd (the plugin root). Compute the same absolute path here so cron
+# (which runs from a different cwd) writes into the same buffer.
+if [[ -z "${WA_BUFFER_DIR:-}" ]]; then
+  workspace_root="${CLAUDE_WORKSPACE_ROOT:-$CLAUDE_PLUGIN_DIR/workspaces}"
+  case "$workspace_root" in
+    /*) ;;
+    *) workspace_root="$CLAUDE_PLUGIN_DIR/$workspace_root" ;;
+  esac
+  export WA_BUFFER_DIR="$workspace_root/wa-buffer"
+fi
+
+exec node --experimental-strip-types "$CLI" "$@"
