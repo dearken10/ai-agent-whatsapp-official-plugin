@@ -25,6 +25,23 @@ if [[ ! -f "$CLI" ]]; then
   exit 1
 fi
 
+# Recover routing env from a sibling scripts/.env when invoked from cron
+# or a bare shell. Inside a claude turn these are already exported by
+# claudeEnv(); this block is the fallback for one-shot scripts whose own
+# `source .env` doesn't auto-export.
+if [[ -z "${ROUTING_BASE_URL:-}" || -z "${ROUTING_API_KEY:-}" || -z "${USER_PHONE:-}" ]]; then
+  shim_dir="$(dirname "$(readlink -f "$0")")"
+  for candidate in "$shim_dir/scripts/.env" "$shim_dir/.env"; do
+    if [[ -f "$candidate" ]]; then
+      set -a
+      # shellcheck source=/dev/null
+      source "$candidate"
+      set +a
+      break
+    fi
+  done
+fi
+
 # Align the buffer dir with the running plugin. The plugin defaults
 # WA_BUFFER_DIR to <workspaceRoot>/wa-buffer with workspaceRoot resolved at
 # its own cwd (the plugin root). Compute the same absolute path here so cron
