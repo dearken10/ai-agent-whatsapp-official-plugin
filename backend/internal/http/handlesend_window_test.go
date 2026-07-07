@@ -230,6 +230,136 @@ func TestHandleSend_WindowClosed_Throttled(t *testing.T) {
 	}
 }
 
+// windowRig is like newTestRig but exercises the proactive 24h-window guard:
+// WindowHours is set on the config, the pairing record carries a seeded
+// LastInboundAt, and sendTextFn defaults to a canary so any test that fails
+// to short-circuit trips a clear assertion instead of a silent success.
+func newWindowRig(t *testing.T, lastInbound time.Time, window time.Duration) *testRig {
+	t.Helper()
+	r := newTestRig(t)
+	r.server.cfg.WindowHours = window
+	r.record.LastInboundAt = lastInbound
+	r.provider.sendTextFn = func(string, string) (string, error) {
+		return "", errors.New("SendText must not be called when window is expired")
+	}
+	return r
+}
+
+// AC-W01: LastInboundAt fresh (within window) → provider is called normally,
+// send succeeds, no template is dispatched.
+func TestHandleSend_ProactiveWindow_Fresh(t *testing.T) {
+	r := newTestRig(t)
+	r.server.cfg.WindowHours = 23 * time.Hour
+	r.record.LastInboundAt = time.Now().UTC().Add(-time.Hour) // 1h ago → open
+	r.provider.sendTextFn = func(string, string) (string, error) {
+		return "wamid.fresh", nil
+	}
+	resp := r.doSend(t, "hello")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var got map[string]string
+	_ = json.Unmarshal(resp.Body.Bytes(), &got)
+	if got["status"] != "accepted" {
+		t.Errorf("status: got %q, want accepted", got["status"])
+	}
+	if r.provider.sendTemplateCalls != 0 {
+		t.Errorf("SendTemplate must not fire when window is fresh; got %d", r.provider.sendTemplateCalls)
+	}
+}
+
+// AC-W02: LastInboundAt older than WindowHours → provider is skipped,
+// re-engagement template is dispatched, response is window_closed.
+func TestHandleSend_ProactiveWindow_Expired(t *testing.T) {
+	r := newWindowRig(t, time.Now().UTC().Add(-25*time.Hour), 23*time.Hour)
+	resp := r.doSend(t, "hello")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(resp.Body.Bytes(), &got)
+	if got["status"] != "window_closed" {
+		t.Errorf("status: got %v, want window_closed", got["status"])
+	}
+	if got["templateSent"] != true {
+		t.Errorf("templateSent: got %v, want true", got["templateSent"])
+	}
+	if r.provider.sendTextCalls != 0 {
+		t.Errorf("SendText must be skipped on proactive window-closed; got %d calls", r.provider.sendTextCalls)
+	}
+	if r.provider.sendTemplateCalls != 1 {
+		t.Errorf("SendTemplate calls: got %d, want 1", r.provider.sendTemplateCalls)
+	}
+}
+
+// AC-W03: LastInboundAt zero-valued (never observed — e.g. a legacy pairing
+// from before the field existed) → treated as expired, template path fires.
+// This is the safety default: no observed inbound = window is not proven open.
+func TestHandleSend_ProactiveWindow_ZeroTimestampTreatedAsExpired(t *testing.T) {
+	r := newWindowRig(t, time.Time{}, 23*time.Hour)
+	resp := r.doSend(t, "hello")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(resp.Body.Bytes(), &got)
+	if got["status"] != "window_closed" {
+		t.Errorf("status: got %v, want window_closed", got["status"])
+	}
+	if r.provider.sendTextCalls != 0 {
+		t.Errorf("SendText must be skipped on zero-timestamp; got %d calls", r.provider.sendTextCalls)
+	}
+}
+
+// AC-W04: WindowHours == 0 disables the proactive check entirely — the
+// provider is called even when LastInboundAt is stale. This preserves the
+// pre-fix behavior for anyone who explicitly opts out.
+func TestHandleSend_ProactiveWindow_DisabledWhenZeroHours(t *testing.T) {
+	r := newTestRig(t)
+	r.server.cfg.WindowHours = 0
+	r.record.LastInboundAt = time.Now().UTC().Add(-30 * 24 * time.Hour) // 30 days stale
+	called := false
+	r.provider.sendTextFn = func(string, string) (string, error) {
+		called = true
+		return "wamid.disabled", nil
+	}
+	resp := r.doSend(t, "hello")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if !called {
+		t.Error("SendText must be called when WindowHours == 0, regardless of LastInboundAt")
+	}
+}
+
+// windowExpired is a pure function of (lastInbound, now, window) — test the
+// full truth table directly rather than relying on real-time drift inside
+// handleSend. Covers the exact boundary (>= vs >) that request-time tests
+// cannot pin down.
+func TestWindowExpired(t *testing.T) {
+	base := time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)
+	window := 23 * time.Hour
+	cases := []struct {
+		name        string
+		lastInbound time.Time
+		now         time.Time
+		want        bool
+	}{
+		{"zero-value is expired", time.Time{}, base, true},
+		{"fresh (1h ago)", base.Add(-time.Hour), base, false},
+		{"one-tick-under-boundary", base.Add(-window + time.Nanosecond), base, false},
+		{"exact-boundary is expired", base.Add(-window), base, true},
+		{"far past", base.Add(-30 * 24 * time.Hour), base, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowExpired(tc.lastInbound, tc.now, window); got != tc.want {
+				t.Errorf("windowExpired: got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // AC-S04: SendText returns ErrWindowClosed, SendTemplate fails → 200
 // {status:"window_closed", templateSent:false}; throttle row is NOT written
 // (so a future attempt can retry the template).

@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS pairing_records (
 	invite_id    TEXT NOT NULL DEFAULT '',
 	expires_at   INTEGER NOT NULL,
 	created_at   INTEGER NOT NULL,
-	updated_at   INTEGER NOT NULL
+	updated_at   INTEGER NOT NULL,
+	last_inbound_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_records_phone  ON pairing_records(phone_number);
 CREATE INDEX IF NOT EXISTS idx_pairing_records_code   ON pairing_records(pairing_code);
@@ -89,6 +90,9 @@ func NewSQLite(path string) (*sqliteStore, error) {
 	if err = tryAddColumn(db, "pairing_records", "invite_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, fmt.Errorf("sqlite store: migrate invite_id: %w", err)
 	}
+	if err = tryAddColumn(db, "pairing_records", "last_inbound_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("sqlite store: migrate last_inbound_at: %w", err)
+	}
 	if err = migrateDropAPIKeyUnique(db); err != nil {
 		return nil, fmt.Errorf("sqlite store: migrate drop api_key UNIQUE: %w", err)
 	}
@@ -133,16 +137,17 @@ func migrateDropAPIKeyUnique(db *sql.DB) error {
 			invite_id    TEXT NOT NULL DEFAULT '',
 			expires_at   INTEGER NOT NULL,
 			created_at   INTEGER NOT NULL,
-			updated_at   INTEGER NOT NULL
+			updated_at   INTEGER NOT NULL,
+			last_inbound_at INTEGER NOT NULL DEFAULT 0
 		)`); err != nil {
 		return fmt.Errorf("create new table: %w", err)
 	}
 	if _, err = tx.Exec(`
 		INSERT INTO pairing_records_new
 			(id, instance_id, api_key, pairing_code, phone_number, wab_number, status,
-			 pairing_mode, invite_id, expires_at, created_at, updated_at)
+			 pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at)
 		SELECT id, instance_id, api_key, pairing_code, phone_number, wab_number, status,
-		       pairing_mode, invite_id, expires_at, created_at, updated_at
+		       pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at
 		FROM pairing_records`); err != nil {
 		return fmt.Errorf("copy rows: %w", err)
 	}
@@ -198,11 +203,11 @@ func (s *sqliteStore) CreatePending(r *PairingRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO pairing_records
 			(id, instance_id, api_key, pairing_code, phone_number, wab_number, status,
-			 pairing_mode, invite_id, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.InstanceID, r.APIKey, r.PairingCode, r.PhoneNumber, r.WabNumber,
 		string(r.Status), string(r.PairingMode), r.InviteID,
-		r.ExpiresAt.Unix(), r.CreatedAt.Unix(), r.UpdatedAt.Unix(),
+		r.ExpiresAt.Unix(), r.CreatedAt.Unix(), r.UpdatedAt.Unix(), unixOrZero(r.LastInboundAt),
 	)
 	if err != nil {
 		return fmt.Errorf("sqlite store: CreatePending: %w", err)
@@ -213,7 +218,7 @@ func (s *sqliteStore) CreatePending(r *PairingRecord) error {
 func (s *sqliteStore) FindByPhone(phone string) (*PairingRecord, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT id, instance_id, api_key, pairing_code, phone_number, wab_number,
-		       status, pairing_mode, invite_id, expires_at, created_at, updated_at
+		       status, pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at
 		FROM   pairing_records
 		WHERE  phone_number = ? AND status = 'ACTIVE'
 		ORDER  BY updated_at DESC
@@ -236,7 +241,7 @@ func (s *sqliteStore) FindByAPIKey(apiKey string) (*PairingRecord, bool, error) 
 	// cache the DISCONNECTED row and silently drop subsequent webhooks.
 	row := s.db.QueryRow(`
 		SELECT id, instance_id, api_key, pairing_code, phone_number, wab_number,
-		       status, pairing_mode, invite_id, expires_at, created_at, updated_at
+		       status, pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at
 		FROM   pairing_records
 		WHERE  api_key = ?
 		ORDER  BY updated_at DESC,
@@ -262,7 +267,7 @@ func (s *sqliteStore) ActivatePairing(code string, phone string, now time.Time) 
 	// Fetch the pending record.
 	row := tx.QueryRow(`
 		SELECT id, instance_id, api_key, pairing_code, phone_number, wab_number,
-		       status, pairing_mode, invite_id, expires_at, created_at, updated_at
+		       status, pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at
 		FROM   pairing_records
 		WHERE  pairing_code = ?`, code)
 	r, err := scanRecord(row)
@@ -286,12 +291,14 @@ func (s *sqliteStore) ActivatePairing(code string, phone string, now time.Time) 
 		return nil, fmt.Errorf("sqlite store: ActivatePairing: evict: %w", err)
 	}
 
-	// Activate.
+	// Activate. The pairing-code message is itself a user-initiated inbound,
+	// so it opens the 24h window — stamp last_inbound_at accordingly.
 	_, err = tx.Exec(`
 		UPDATE pairing_records
-		SET    phone_number = ?, status = 'ACTIVE', pairing_code = NULL, updated_at = ?
+		SET    phone_number = ?, status = 'ACTIVE', pairing_code = NULL,
+		       updated_at = ?, last_inbound_at = ?
 		WHERE  id = ?`,
-		phone, now.Unix(), r.ID)
+		phone, now.Unix(), now.Unix(), r.ID)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite store: ActivatePairing: activate: %w", err)
 	}
@@ -304,6 +311,7 @@ func (s *sqliteStore) ActivatePairing(code string, phone string, now time.Time) 
 	r.Status = StatusActive
 	r.PairingCode = ""
 	r.UpdatedAt = now
+	r.LastInboundAt = now
 	return r, nil
 }
 
@@ -408,21 +416,22 @@ func (s *sqliteStore) ActivatePersistentPairing(invite *PersistentInvite, phone 
 		PhoneNumber: phone,
 		WabNumber:   invite.WabNumber,
 		Status:      StatusActive,
-		PairingMode: ModePersistent,
-		InviteID:    invite.ID,
-		ExpiresAt:   time.Time{}, // no expiry for persistent pairings
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		PairingMode:   ModePersistent,
+		InviteID:      invite.ID,
+		ExpiresAt:     time.Time{}, // no expiry for persistent pairings
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastInboundAt: now, // the invite-code message opens the 24h window
 	}
 
 	_, err = tx.Exec(`
 		INSERT INTO pairing_records
 			(id, instance_id, api_key, pairing_code, phone_number, wab_number, status,
-			 pairing_mode, invite_id, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			 pairing_mode, invite_id, expires_at, created_at, updated_at, last_inbound_at)
+		VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
 		record.ID, record.InstanceID, record.APIKey, record.PhoneNumber, record.WabNumber,
 		string(record.Status), string(record.PairingMode), record.InviteID,
-		record.CreatedAt.Unix(), record.UpdatedAt.Unix(),
+		record.CreatedAt.Unix(), record.UpdatedAt.Unix(), record.LastInboundAt.Unix(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite store: ActivatePersistentPairing: insert: %w", err)
@@ -432,6 +441,20 @@ func (s *sqliteStore) ActivatePersistentPairing(invite *PersistentInvite, phone 
 		return nil, fmt.Errorf("sqlite store: ActivatePersistentPairing: commit: %w", err)
 	}
 	return record, nil
+}
+
+func (s *sqliteStore) UpdateLastInboundAt(phone string, ts time.Time) error {
+	// Refresh every ACTIVE row for this phone. In persistent-mode pairings a
+	// phone can hold ACTIVE rows across multiple WABs; any of them is a valid
+	// route target, so all need the fresh timestamp.
+	_, err := s.db.Exec(
+		`UPDATE pairing_records SET last_inbound_at = ? WHERE phone_number = ? AND status = 'ACTIVE'`,
+		unixOrZero(ts), phone,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlite store: UpdateLastInboundAt: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) TrackPairRequest(clientIP string, now time.Time, limit int) (bool, error) {
@@ -506,12 +529,12 @@ func (s *sqliteStore) Close() error {
 func scanRecord(row *sql.Row) (*PairingRecord, error) {
 	var r PairingRecord
 	var status, pairingMode string
-	var expiresAt, createdAt, updatedAt int64
+	var expiresAt, createdAt, updatedAt, lastInboundAt int64
 	var pairingCode, phoneNumber, inviteID sql.NullString
 	err := row.Scan(
 		&r.ID, &r.InstanceID, &r.APIKey, &pairingCode, &phoneNumber, &r.WabNumber,
 		&status, &pairingMode, &inviteID,
-		&expiresAt, &createdAt, &updatedAt,
+		&expiresAt, &createdAt, &updatedAt, &lastInboundAt,
 	)
 	if err != nil {
 		return nil, err
@@ -524,6 +547,7 @@ func scanRecord(row *sql.Row) (*PairingRecord, error) {
 	r.ExpiresAt = time.Unix(expiresAt, 0).UTC()
 	r.CreatedAt = time.Unix(createdAt, 0).UTC()
 	r.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	r.LastInboundAt = timeFromUnixOrZero(lastInboundAt)
 	return &r, nil
 }
 
@@ -553,4 +577,24 @@ func nullUnixTime(t *time.Time) interface{} {
 		return nil
 	}
 	return t.Unix()
+}
+
+// unixOrZero returns 0 for a zero-valued time.Time (whose Unix() otherwise
+// returns a large negative sentinel), or t.Unix() for any real timestamp.
+// Callers pass this into the store where 0 is the canonical "never observed"
+// value for last_inbound_at.
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// timeFromUnixOrZero is the inverse of unixOrZero: 0 → zero Time, any other
+// Unix seconds → UTC time.Time.
+func timeFromUnixOrZero(secs int64) time.Time {
+	if secs == 0 {
+		return time.Time{}
+	}
+	return time.Unix(secs, 0).UTC()
 }

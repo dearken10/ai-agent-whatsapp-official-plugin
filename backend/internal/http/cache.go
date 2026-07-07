@@ -2,6 +2,7 @@ package http
 
 import (
 	"sync"
+	"time"
 
 	"github.com/imbee/openclaw-whatsapp-official/backend/internal/store"
 )
@@ -48,6 +49,19 @@ func (c *recordCache) set(r *store.PairingRecord) {
 	}
 	if r.APIKey != "" {
 		c.byAPIKey[r.APIKey] = r
+	}
+}
+
+// updateLastInboundAt refreshes the timestamp on the cached record so the
+// next handleSend decision reads the fresh value without a store round-trip.
+// Silently no-ops when the phone is not cached (the next store hit will
+// repopulate the cache with the persisted timestamp). Kept separate from
+// set() so callers do not need to reconstruct the full record.
+func (c *recordCache) updateLastInboundAt(phone string, ts time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r, ok := c.byPhone[phone]; ok {
+		r.LastInboundAt = ts
 	}
 }
 

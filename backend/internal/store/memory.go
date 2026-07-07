@@ -91,6 +91,7 @@ func (m *Memory) ActivatePairing(code string, phone string, now time.Time) (*Pai
 	record.Status = StatusActive
 	record.PairingCode = ""
 	record.UpdatedAt = now
+	record.LastInboundAt = now
 	delete(m.byCode, code)
 	m.byPhone[phone] = record
 	return record, nil
@@ -150,16 +151,17 @@ func (m *Memory) ActivatePersistentPairing(invite *PersistentInvite, phone strin
 	}
 
 	record := &PairingRecord{
-		ID:          uuid.NewString(),
-		InstanceID:  invite.InstanceID,
-		APIKey:      invite.APIKey,
-		PhoneNumber: phone,
-		WabNumber:   invite.WabNumber,
-		Status:      StatusActive,
-		PairingMode: ModePersistent,
-		InviteID:    invite.ID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            uuid.NewString(),
+		InstanceID:    invite.InstanceID,
+		APIKey:        invite.APIKey,
+		PhoneNumber:   phone,
+		WabNumber:     invite.WabNumber,
+		Status:        StatusActive,
+		PairingMode:   ModePersistent,
+		InviteID:      invite.ID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastInboundAt: now,
 	}
 	m.byPhone[phone] = record
 	m.byInstance[record.InstanceID] = append(m.byInstance[record.InstanceID], record)
@@ -167,6 +169,25 @@ func (m *Memory) ActivatePersistentPairing(invite *PersistentInvite, phone strin
 	// byAPIKey with the most recent pairing (used for WS auth fallback only).
 	m.byAPIKey[record.APIKey] = record
 	return record, nil
+}
+
+func (m *Memory) UpdateLastInboundAt(phone string, ts time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.byPhone[phone]; ok {
+		r.LastInboundAt = ts
+	}
+	// byInstance may hold additional ACTIVE records for the same phone under
+	// different pairings (persistent mode across WABs); refresh those too so
+	// whichever record wins a lookup carries the latest timestamp.
+	for _, records := range m.byInstance {
+		for _, r := range records {
+			if r.PhoneNumber == phone && r.Status == StatusActive {
+				r.LastInboundAt = ts
+			}
+		}
+	}
+	return nil
 }
 
 func (m *Memory) TrackPairRequest(clientIP string, now time.Time, limit int) (bool, error) {

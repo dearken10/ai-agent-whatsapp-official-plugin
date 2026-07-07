@@ -210,6 +210,7 @@ func (fs *fileStore) ActivatePairing(code string, phone string, now time.Time) (
 	record.Status = StatusActive
 	record.PairingCode = ""
 	record.UpdatedAt = now
+	record.LastInboundAt = now
 	delete(fs.byCode, code)
 	fs.byPhone[phone] = record
 
@@ -273,22 +274,39 @@ func (fs *fileStore) ActivatePersistentPairing(invite *PersistentInvite, phone s
 	}
 
 	record := &PairingRecord{
-		ID:          uuid.NewString(),
-		InstanceID:  invite.InstanceID,
-		APIKey:      invite.APIKey,
-		PhoneNumber: phone,
-		WabNumber:   invite.WabNumber,
-		Status:      StatusActive,
-		PairingMode: ModePersistent,
-		InviteID:    invite.ID,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:            uuid.NewString(),
+		InstanceID:    invite.InstanceID,
+		APIKey:        invite.APIKey,
+		PhoneNumber:   phone,
+		WabNumber:     invite.WabNumber,
+		Status:        StatusActive,
+		PairingMode:   ModePersistent,
+		InviteID:      invite.ID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		LastInboundAt: now,
 	}
 	fs.records = append(fs.records, record)
 	fs.byPhone[phone] = record
 	fs.byAPIKey[record.APIKey] = record
 
 	return record, fs.flush()
+}
+
+func (fs *fileStore) UpdateLastInboundAt(phone string, ts time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	changed := false
+	for _, r := range fs.records {
+		if r.PhoneNumber == phone && r.Status == StatusActive {
+			r.LastInboundAt = ts
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return fs.flush()
 }
 
 func (fs *fileStore) TrackPairRequest(clientIP string, now time.Time, limit int) (bool, error) {

@@ -316,6 +316,22 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Proactive 24h-window check. 360dialog silently accepts free-form sends
+	// outside the window (HTTP 200 + wamid) and WhatsApp drops them downstream,
+	// so the provider's ErrWindowClosed signal is unreliable. We short-circuit
+	// to the re-engagement template path when our recorded LastInboundAt is
+	// stale. WindowHours == 0 disables the check (compat / tests).
+	if s.cfg.WindowHours > 0 && windowExpired(targetRecord.LastInboundAt, time.Now().UTC(), s.cfg.WindowHours) {
+		templateSent := s.dispatchReengagementTemplate(r.Context(), targetRecord.WabNumber, req.ToPhoneNumber)
+		log.Printf("[send] window_closed_proactive to=%s last_inbound=%s templateSent=%v",
+			maskPhone(req.ToPhoneNumber), targetRecord.LastInboundAt.Format(time.RFC3339), templateSent)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":       "window_closed",
+			"templateSent": templateSent,
+		})
+		return
+	}
+
 	var (
 		messageID string
 		sendErr   error
@@ -352,6 +368,19 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": "send failed: " + sendErr.Error()})
+}
+
+// windowExpired reports whether the recorded last-inbound timestamp is far
+// enough in the past that a free-form outbound would fall outside WhatsApp's
+// 24h customer service window. A zero timestamp (no inbound ever observed —
+// legacy row from before this field existed, or a pairing that never
+// exchanged messages) is treated as expired: safer to send a re-engagement
+// template than to silently drop a message.
+func windowExpired(lastInbound, now time.Time, window time.Duration) bool {
+	if lastInbound.IsZero() {
+		return true
+	}
+	return now.Sub(lastInbound) >= window
 }
 
 // dispatchReengagementTemplate consults the throttle store and, if not recently
@@ -482,6 +511,19 @@ func (s *Server) handleSendMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	if targetRecord.APIKey != apiKey {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target mismatch: phone not paired to this instance"})
+		return
+	}
+
+	// Same proactive 24h-window guard as handleSend — see comment there for
+	// why we do not trust the provider's error signal.
+	if s.cfg.WindowHours > 0 && windowExpired(targetRecord.LastInboundAt, time.Now().UTC(), s.cfg.WindowHours) {
+		templateSent := s.dispatchReengagementTemplate(r.Context(), targetRecord.WabNumber, to)
+		log.Printf("[send-media] window_closed_proactive to=%s last_inbound=%s templateSent=%v",
+			maskPhone(to), targetRecord.LastInboundAt.Format(time.RFC3339), templateSent)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":       "window_closed",
+			"templateSent": templateSent,
+		})
 		return
 	}
 
@@ -762,8 +804,18 @@ func (s *Server) routeIncoming(msg webhook.MetaWebhookMessage) {
 		s.cache.set(record)
 	}
 	if record.Status != store.StatusActive {
-		log.Printf("[route] pairing not active for from=%s status=%s", maskPhone(from), record.Status)
+		log.Printf("[route] pairing not active for from=%s status=%s id=%s instance=%s api_key=%.8s… updated_at=%s",
+			maskPhone(from), record.Status, record.ID, record.InstanceID, record.APIKey, record.UpdatedAt.Format(time.RFC3339))
 		return
+	}
+
+	// This is a user-initiated inbound — refresh the 24h customer service
+	// window. handleSend consults LastInboundAt to decide whether a free-form
+	// send is allowed; without this stamp, every message-and-reply cycle would
+	// look expired after the first 24h.
+	s.cache.updateLastInboundAt(from, now)
+	if err := s.store.UpdateLastInboundAt(from, now); err != nil {
+		log.Printf("[route] UpdateLastInboundAt failed phone=%s err=%v", maskPhone(from), err)
 	}
 
 	// Detect re-engagement template "Read Now" quick-reply tap. The button
