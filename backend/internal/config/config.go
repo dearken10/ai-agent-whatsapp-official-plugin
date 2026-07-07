@@ -38,6 +38,15 @@ type Config struct {
 	ReengagementTemplateLang   string        // BCP-47 language code, e.g. "en"
 	ReengagementButtonPayload  string        // quick-reply payload that triggers WINDOW_OPENED
 	TemplateThrottleHours      time.Duration // per-(wab, phone, template) cooldown
+
+	// WindowHours is the client-side 24-hour customer service window enforced
+	// before every free-form outbound send. If now - LastInboundAt >= this
+	// value, handleSend/handleSendMedia skip the provider call and go straight
+	// to the re-engagement template path. Set to 0 to disable the proactive
+	// check (falling back to relying on the provider's error signal, which
+	// 360dialog does NOT reliably surface — see PR notes). Default 23h leaves
+	// a 1h safety margin for clock skew and provider grace periods.
+	WindowHours time.Duration
 }
 
 func Load() Config {
@@ -63,6 +72,7 @@ func Load() Config {
 		ReengagementTemplateLang:  getenv("REENGAGEMENT_TEMPLATE_LANG", "en"),
 		ReengagementButtonPayload: getenv("REENGAGEMENT_BUTTON_PAYLOAD", "OPENCLAW_READ_NOW"),
 		TemplateThrottleHours:     time.Duration(getint("TEMPLATE_THROTTLE_HOURS", 24)) * time.Hour,
+		WindowHours:               time.Duration(getint("WINDOW_HOURS", 23)) * time.Hour,
 	}
 }
 

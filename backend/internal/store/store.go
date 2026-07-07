@@ -30,6 +30,14 @@ type PairingRecord struct {
 	ExpiresAt   time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// LastInboundAt is the time of the most recent user-initiated message
+	// from PhoneNumber on this pairing. Used to enforce the WhatsApp 24-hour
+	// customer service window proactively: handleSend consults this before
+	// calling the provider, because 360dialog accepts free-form sends outside
+	// the window with HTTP 200 and no error, but WhatsApp downstream drops
+	// them silently. Zero value means "no inbound observed" and is treated as
+	// window-closed (safest default).
+	LastInboundAt time.Time
 }
 
 // PersistentInvite is a reusable pairing code tied to one instance.
@@ -59,6 +67,13 @@ type Repository interface {
 	FindInviteByAPIKey(apiKey string) (*PersistentInvite, bool, error)
 	RevokeInvite(id string, now time.Time) error
 	ActivatePersistentPairing(invite *PersistentInvite, phone string, now time.Time) (*PairingRecord, error)
+
+	// UpdateLastInboundAt stamps the LastInboundAt timestamp on every ACTIVE
+	// pairing record for phone. Persistent-mode pairings can have multiple
+	// active rows for the same phone across WABs; every one is refreshed so
+	// subsequent handleSend decisions are correct regardless of which record
+	// wins the by-phone lookup. Best-effort: callers log and continue on error.
+	UpdateLastInboundAt(phone string, ts time.Time) error
 
 	// Rate limiting
 	TrackPairRequest(clientIP string, now time.Time, limit int) (bool, error)
