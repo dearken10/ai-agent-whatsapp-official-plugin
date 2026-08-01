@@ -12,6 +12,9 @@ export type Config = {
   waBufferTtlHours: number;
   waBufferMaxPerPhone: number;
   waBufferSweepIntervalMin: number;
+  // Phone numbers (WhatsApp msisdn, no "+") allowed to drive self-service
+  // re-auth over chat when the Claude token expires. Empty = feature off.
+  adminPhones: string[];
 };
 
 function required(name: string): string {
@@ -44,6 +47,10 @@ export function loadConfig(): Config {
     waBufferTtlHours: getIntEnv("WA_BUFFER_TTL_HOURS", 72),
     waBufferMaxPerPhone: getIntEnv("WA_BUFFER_MAX_PER_PHONE", 50),
     waBufferSweepIntervalMin: getIntEnv("WA_BUFFER_SWEEP_INTERVAL_MIN", 15),
+    adminPhones: (process.env.ADMIN_PHONE ?? "")
+      .split(",")
+      .map((s) => s.replace(/[^0-9]/g, ""))
+      .filter((s) => s.length > 0),
   };
 }
 

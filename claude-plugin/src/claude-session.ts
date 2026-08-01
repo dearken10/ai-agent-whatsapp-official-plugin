@@ -89,6 +89,7 @@ type ClaudeResult = {
   session_id?: string;
   is_error?: boolean;
   subtype?: string;
+  api_error_status?: number;
 };
 
 // Claude Code writes synthetic "API Error: …" assistant messages into the
@@ -99,12 +100,54 @@ type ClaudeResult = {
 // can clear the session id and start fresh on the next turn.
 const API_ERROR_TEXT_PATTERN = /^API Error:/;
 
+// Auth failures (expired/revoked OAuth token, HTTP 401) surface differently
+// from policy refusals: Claude Code emits a synthetic assistant message whose
+// text is "Failed to authenticate. API Error: 401 …" plus a result carrying
+// `api_error_status: 401` / `error: "authentication_failed"`. That text does
+// NOT start with "API Error:" so API_ERROR_TEXT_PATTERN misses it and the raw
+// message leaks to the user. Detect it structurally instead and surface a
+// friendly re-auth notice.
+const AUTH_ERROR_TEXT_PATTERN =
+  /failed to authenticate|oauth (access )?token|authentication[_ ]failed|api error:\s*401/i;
+
+function isAuthErrorSignal(opts: {
+  text?: string;
+  apiErrorStatus?: unknown;
+  errorField?: unknown;
+  isApiErrorMessage?: unknown;
+}): boolean {
+  if (opts.apiErrorStatus === 401) return true;
+  if (opts.errorField === "authentication_failed") return true;
+  // Only trust the text pattern when the CLI already flagged the message as an
+  // API-error message, so a user literally chatting about "oauth tokens" can't
+  // trip a false positive.
+  if (
+    opts.isApiErrorMessage === true &&
+    typeof opts.text === "string" &&
+    AUTH_ERROR_TEXT_PATTERN.test(opts.text)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export class SessionResetError extends Error {
   reason: string;
   constructor(reason: string) {
     super(`session reset: ${reason}`);
     this.name = "SessionResetError";
     this.reason = reason;
+  }
+}
+
+// Thrown when Claude Code can't authenticate (token expired/revoked). The
+// caller catches this to send a re-auth notice instead of the raw 401 text.
+export class AuthError extends Error {
+  detail: string;
+  constructor(detail: string) {
+    super(`auth error: ${detail}`);
+    this.name = "AuthError";
+    this.detail = detail;
   }
 }
 
@@ -150,6 +193,17 @@ export async function dispatchToClaude(
   }
 
   const resultText = (parsed.result ?? "").trim();
+  if (
+    isAuthErrorSignal({
+      text: resultText,
+      apiErrorStatus: parsed.api_error_status,
+      isApiErrorMessage: true,
+    })
+  ) {
+    // The failed turn forked a new session id we never persisted; the prior
+    // resume id (if any) is still valid, so leave the store untouched.
+    throw new AuthError(resultText.split("\n")[0].slice(0, 200) || "authentication failed");
+  }
   if (API_ERROR_TEXT_PATTERN.test(resultText)) {
     await store.clear(phone);
     throw new SessionResetError(resultText.split("\n")[0].slice(0, 200));
@@ -240,6 +294,7 @@ export async function dispatchToClaudeStream(
 
   let sessionId = resume ?? "";
   let resultError: string | null = null;
+  let authError: string | null = null;
   let sessionPoisoned = false;
   let poisonReason = "";
   const markPoisoned = (text: string): void => {
@@ -269,11 +324,19 @@ export async function dispatchToClaudeStream(
 
     if (event.type === "assistant") {
       const message = event.message as { content?: Array<Record<string, unknown>> } | undefined;
+      const isApiErrorMessage = event.is_api_error_message === true;
+      const errorField = typeof event.error === "string" ? event.error : undefined;
       const blockTypes = (message?.content ?? []).map((b) => String(b.type));
       console.log(`stream assistant blocks=[${blockTypes.join(",")}]`);
       for (const block of message?.content ?? []) {
         if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
           const text = block.text.trim();
+          if (isAuthErrorSignal({ text, errorField, isApiErrorMessage })) {
+            // Suppress the raw "Failed to authenticate…" text; surface a
+            // friendly re-auth notice via AuthError once the turn ends.
+            if (!authError) authError = text;
+            continue;
+          }
           if (API_ERROR_TEXT_PATTERN.test(text)) {
             markPoisoned(text);
             continue;
@@ -294,6 +357,16 @@ export async function dispatchToClaudeStream(
         await persistIfNew(sessionId);
       }
       const resultText = typeof event.result === "string" ? event.result : "";
+      if (
+        isAuthErrorSignal({
+          text: resultText,
+          apiErrorStatus: event.api_error_status,
+          errorField: typeof event.error === "string" ? event.error : undefined,
+          isApiErrorMessage: true,
+        })
+      ) {
+        if (!authError) authError = resultText || "authentication failed";
+      }
       if (event.is_error) {
         resultError = `claude error (${event.subtype ?? "unknown"}): ${resultText}`;
       }
@@ -308,6 +381,12 @@ export async function dispatchToClaudeStream(
   }
 
   const code = await exitPromise;
+  if (authError) {
+    // Roll back the forked session id from this failed turn; the prior resume
+    // id (restored by rollback) is still valid once re-authenticated.
+    await rollbackSession();
+    throw new AuthError(authError.split("\n")[0].slice(0, 200));
+  }
   if (sessionPoisoned) {
     await store.clear(phone);
     persistedNewSession = false;
@@ -393,6 +472,11 @@ function runClaude(
     });
     child.on("exit", (code) => {
       if (code === 0) return resolve(stdout);
+      // Auth/API errors exit non-zero but still emit a full JSON result on
+      // stdout (is_error, api_error_status, result text). Hand that back so
+      // dispatchToClaude can classify it (auth vs generic) rather than lose
+      // the detail to a raw throw.
+      if (stdout.trim().startsWith("{")) return resolve(stdout);
       reject(new Error(`claude exited ${code}: ${stderr.trim() || stdout.trim()}`));
     });
   });
