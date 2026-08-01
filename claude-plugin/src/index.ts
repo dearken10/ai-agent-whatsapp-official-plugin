@@ -7,14 +7,47 @@ import { fetchMedia, flushPending, LOCAL_WAB, sendOutboundText, startTypingHeart
 import { Buffer } from "./buffer.ts";
 import { SessionStore } from "./session-store.ts";
 import {
+  AuthError,
   dispatchToClaude,
   dispatchToClaudeStream,
   SessionResetError,
   workspaceForPhone,
 } from "./claude-session.ts";
+import {
+  hasPendingReauth,
+  isAdmin,
+  looksLikeAuthCode,
+  startReauth,
+  submitReauthCode,
+} from "./reauth.ts";
 
 const SESSION_RESET_NOTICE =
   "Sorry — Claude hit an API error and our chat session got into a bad state. I've reset it. Please resend your message.";
+
+// Shown to NON-admin users when the token expires — they can't fix it, so keep
+// it vague and reassuring rather than dumping the raw 401.
+const AUTH_ERROR_NOTICE =
+  "⚠️ The assistant is temporarily unavailable (its session expired). The team has been notified — please try again shortly.";
+
+// Sent to an admin: the live login URL to approve, after which they reply with
+// the code in chat. {URL} is substituted at send time.
+function reauthPrompt(url: string): string {
+  return [
+    "⚠️ My Claude session expired. To restore it:",
+    "",
+    "1. Open this link and approve:",
+    url,
+    "",
+    "2. Reply here with the code it gives you (looks like `abc123#xyz789`).",
+    "",
+    "The link expires in a few minutes.",
+  ].join("\n");
+}
+
+const REAUTH_SUCCESS =
+  "✅ Re-authenticated successfully. Please resend your message.";
+const REAUTH_FAILED = (reason: string): string =>
+  `❌ Re-auth failed: ${reason}\n\nSend any message to get a fresh login link.`;
 
 type WsEnvelope = {
   type: "INBOUND_MESSAGE" | "PAIRING_COMPLETE" | "WINDOW_OPENED" | "HEARTBEAT" | "ERROR";
@@ -96,6 +129,22 @@ function chunkText(text: string, max = 3500): string[] {
   return chunks.filter((c) => c.length > 0);
 }
 
+// Token expired mid-turn. Admins get a live login link (self-service re-auth);
+// everyone else gets a vague "temporarily unavailable" notice.
+async function onAuthError(cfg: Config, from: string, detail: string): Promise<void> {
+  console.error(`AUTH_EXPIRED for ${from}: ${detail}`);
+  if (isAdmin(cfg, from)) {
+    const r = await startReauth(cfg, from);
+    if ("url" in r) {
+      console.log(`reauth: sent login link to admin ${from}`);
+      await sendOutboundText(cfg, from, reauthPrompt(r.url));
+      return;
+    }
+    console.error(`reauth: could not start login for ${from}: ${r.error}`);
+  }
+  await sendOutboundText(cfg, from, AUTH_ERROR_NOTICE);
+}
+
 async function handleInbound(
   cfg: Config,
   store: SessionStore,
@@ -104,6 +153,17 @@ async function handleInbound(
 ): Promise<void> {
   const from = String(envelope.payload.from ?? "");
   if (!from) return;
+
+  // Self-service re-auth: if this admin has a login in progress and just sent
+  // the OAuth code, complete the login here instead of dispatching to Claude.
+  const rawText = String(envelope.payload.text ?? "").trim();
+  if (isAdmin(cfg, from) && hasPendingReauth(from) && looksLikeAuthCode(rawText)) {
+    console.log(`reauth: received code from admin ${from}`);
+    const r = await submitReauthCode(rawText);
+    console.log(`reauth: completion ok=${r.ok} ${r.ok ? "" : r.message}`);
+    await sendOutboundText(cfg, from, r.ok ? REAUTH_SUCCESS : REAUTH_FAILED(r.message));
+    return;
+  }
 
   const prompt = await buildPrompt(cfg, from, envelope.payload);
   if (!prompt) return;
@@ -167,6 +227,12 @@ async function handleInbound(
       console.log(`claude reply session=${sessionId} (streamed)`);
     } catch (err) {
       if (heartbeat) await heartbeat.stop();
+      if (err instanceof AuthError) {
+        // Drop any partial buffered text — don't leak the raw 401 message.
+        bufferedFinalText = null;
+        await onAuthError(cfg, from, err.detail);
+        return;
+      }
       if (err instanceof SessionResetError) {
         console.log(`session reset for ${from}: ${err.reason}`);
         // Drop any partial buffered text — its context is gone.
@@ -196,6 +262,10 @@ async function handleInbound(
     }
   } catch (err) {
     if (heartbeat) await heartbeat.stop();
+    if (err instanceof AuthError) {
+      await onAuthError(cfg, from, err.detail);
+      return;
+    }
     if (err instanceof SessionResetError) {
       console.log(`session reset for ${from}: ${err.reason}`);
       await sendOutboundText(cfg, from, SESSION_RESET_NOTICE);
