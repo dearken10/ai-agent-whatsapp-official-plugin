@@ -1,18 +1,23 @@
-# OpenClaw Official WhatsApp Plugin
+# WhatsApp → AI Agent Bridge
 
-> **Looking to install the OpenClaw plugin?** See [`openclaw-plugin/README.md`](./openclaw-plugin/README.md) for end-user installation, FAQ, and plan details.
->
-> **Want to forward WhatsApp into a Claude Code session?** See [`claude-plugin/README.md`](./claude-plugin/README.md).
+> **Which agent are you connecting?**
+> - **OpenClaw** — see [`openclaw-plugin/README.md`](./openclaw-plugin/README.md)
+> - **Claude Code** — see [`claude-plugin/README.md`](./claude-plugin/README.md)
 
-This repo contains the backend routing server plus one or more agent plugins that bridge WhatsApp (via imBee) to a locally-running AI agent. The backend is agent-agnostic — it speaks a small WebSocket + HTTP contract that any plugin can consume.
+This repo bridges WhatsApp (via 360dialog or Meta Cloud API) to a locally-running AI agent. The backend is **agent-agnostic** — it speaks a small WebSocket + HTTP contract that any plugin can consume — and today ships with two first-class plugins:
+
+- **`openclaw-plugin/`** — an OpenClaw channel plugin that runs inside the OpenClaw gateway.
+- **`claude-plugin/`** — a standalone bridge that forwards each paired WhatsApp user into their own persistent Claude Code CLI session (one WhatsApp user ⇄ one `claude --resume <sid>` session).
+
+Both plugins connect to the same backend and share the same pairing/webhook/window infrastructure, so you can pick per WhatsApp number — or run them side-by-side against different pairings.
 
 **Repo layout:**
 
 | Path | Description |
 |:---|:---|
-| `backend/` | Go routing server — pairing, webhook verification, WebSocket hub, media proxy (agent-agnostic) |
+| `backend/` | Go routing server — pairing, webhook verification, WebSocket hub, media proxy, 24h-window enforcement, re-engagement templates (agent-agnostic) |
 | `openclaw-plugin/` | OpenClaw channel plugin — runs inside the OpenClaw gateway |
-| `claude-plugin/` | Claude Code bridge — forwards each paired WhatsApp user to their own Claude Code session |
+| `claude-plugin/` | Claude Code bridge — forwards each paired WhatsApp user to their own Claude Code session, with a local buffer for messages sent outside the 24h window |
 | `docs/` | PRD and technical design |
 | `scripts/` | Dev, ngrok, deploy, and publish helpers |
 
@@ -66,7 +71,11 @@ make ws API_KEY=imbee_xxx
 # Prints PAIRING_COMPLETE once you send the code
 ```
 
-### 5. Install the plugin into OpenClaw
+### 5. Wire up an agent
+
+Pick one — both use the API key from step 4:
+
+**Option A — OpenClaw**
 
 ```bash
 openclaw plugins install -l ./openclaw-plugin    # dev link (no copy)
@@ -88,9 +97,18 @@ Add channel config to your OpenClaw config file:
 }
 ```
 
+**Option B — Claude Code**
+
+```bash
+cd claude-plugin
+npm run setup    # walks you through pairing + writes .env + starts the bridge
+```
+
+(Or start from scratch with `npx claude-whatsapp-official-plugin setup` — it runs the same wizard without cloning this repo.)
+
 ### 6. Test
 
-Send a WhatsApp message to the shared number — your OpenClaw agent should reply.
+Send a WhatsApp message to the shared number — your agent (OpenClaw or Claude Code) should reply.
 
 Simulate an inbound webhook locally:
 
@@ -189,21 +207,57 @@ ssh -i ~/.ssh/openclaw-wa.pem ec2-user@<Public IP> 'journalctl -u wa-server -f'
 
 | `STORE_DRIVER` | Persistence | Use case |
 |:---|:---|:---|
-| `file` | JSON file on disk (default) | Local dev, single-VM cloud deploy |
+| `sqlite` | Single `.db` file with WAL mode (default) | Local dev, single-VM cloud deploy |
+| `file` | JSON file on disk | Legacy / very-small deployments |
 | `memory` | In-process only, lost on restart | Unit tests, throwaway dev |
-| `postgres` | PostgreSQL | Multi-replica production |
 
 Configure in `.env`:
 
 ```bash
-# File store (default)
+# SQLite (default) — no external server, WAL for concurrent reads
+STORE_DRIVER=sqlite
+STORE_FILE_PATH=./data/store.db      # .db suffix is appended if omitted
+
+# JSON file
 STORE_DRIVER=file
 STORE_FILE_PATH=./data/store.json
-
-# Postgres
-STORE_DRIVER=postgres
-POSTGRES_DSN=postgres://postgres:postgres@localhost:5432/whatsapp_plugin?sslmode=disable
 ```
+
+---
+
+## 24-hour customer service window
+
+WhatsApp only permits free-form outbound messages within 24 hours of the user's last inbound. **360dialog silently accepts sends past that window** (HTTP 200 + wamid) but WhatsApp discards them downstream, so a naive integration loses messages with no error signal.
+
+The backend enforces the window itself:
+
+1. Every user-initiated webhook stamps `last_inbound_at` on the pairing record.
+2. Before `/api/v1/send` calls the provider, it checks `now - last_inbound_at >= WINDOW_HOURS` (default `23h`). If stale, it skips the provider entirely and dispatches a re-engagement template (`REENGAGEMENT_TEMPLATE_NAME`) with a quick-reply button; the send response becomes `{"status":"window_closed","templateSent":…}` instead of `accepted`.
+3. Template sends are throttled per `(wab, phone, template)` for `TEMPLATE_THROTTLE_HOURS` (default `24h`) so a chatty agent can't spam.
+4. When the user taps the template's **Read Now** button, the backend WS-broadcasts `WINDOW_OPENED` to the paired plugin instance — which flushes its local buffer of any messages queued while the window was closed.
+
+Relevant env vars (all optional, sane defaults):
+
+| Var | Default | Purpose |
+|:---|:---|:---|
+| `WINDOW_HOURS` | `23` | Client-side window guard. `0` disables the proactive check. |
+| `TEMPLATE_THROTTLE_HOURS` | `24` | Per-(wab, phone, template) send cooldown. |
+| `REENGAGEMENT_TEMPLATE_NAME` | `smart_session_20260521` | 360dialog / Meta-approved template. |
+| `REENGAGEMENT_TEMPLATE_LANG` | `en` | BCP-47 template language. |
+| `REENGAGEMENT_BUTTON_PAYLOAD` | `OPENCLAW_READ_NOW` | Payload override that maps the button tap to `WINDOW_OPENED`. |
+
+Both plugins understand the `window_closed` response contract; the Claude Code plugin additionally persists a per-phone buffer in `WA_BUFFER_DIR` and drains it on the next `WINDOW_OPENED`.
+
+---
+
+## Pairing modes
+
+Each backend pairing carries a `pairing_mode`:
+
+| Mode | Behaviour |
+|:---|:---|
+| `single_use` (default) | A fresh `CLAW-XXXX-YYYY` code is minted per pairing request and expires after `PAIRING_CODE_TTL_SECONDS`. One code = one phone. Used by both `make pair` and the plugins' first-run setup wizards. |
+| `persistent` | An **invite** — one code, one instance, unlimited phones. Any phone that texts the code becomes an active pairing under the same instance/API key. Useful for shared/team bots where you want to hand out one QR to many devices. Manage via `POST /api/v1/pair/request {"mode":"persistent"}`, `GET /api/v1/pair/invite`, `DELETE /api/v1/pair/invite/{inviteId}`. |
 
 ---
 
@@ -212,9 +266,12 @@ POSTGRES_DSN=postgres://postgres:postgres@localhost:5432/whatsapp_plugin?sslmode
 | Endpoint | Method | Auth | Description |
 |:---|:---|:---|:---|
 | `/healthz` | GET | — | Health check |
-| `/api/v1/pair/request` | POST | — | Generate pairing code + API key |
+| `/api/v1/pair/request` | POST | — | Generate pairing code + API key. Body: `{"mode":"single_use"\|"persistent"}` (default `single_use`) |
+| `/api/v1/pair/invite` | GET | Bearer | Fetch active persistent invite for this API key |
+| `/api/v1/pair/invite/{inviteId}` | DELETE | Bearer | Revoke a persistent invite |
 | `/api/v1/pair/status` | GET | Bearer | Check pairing status |
-| `/api/v1/send` | POST | Bearer | Send outbound text or media |
+| `/api/v1/send` | POST | Bearer | Send outbound text or media. Returns `{"status":"accepted","messageId":…}` or `{"status":"window_closed","templateSent":…}` |
+| `/api/v1/send-media` | POST | Bearer | Multipart file upload — sends via provider without needing a public URL |
 | `/api/v1/typing` | POST | Bearer | Mark message read + show typing indicator |
 | `/api/v1/media/{mediaId}` | GET | Bearer | Download inbound media (proxied from provider) |
 | `/webhooks/whatsapp` | GET | — | Meta webhook registration challenge |
@@ -264,6 +321,41 @@ Bump `version` in **both** `openclaw-plugin/package.json` and `openclaw-plugin/o
 ```bash
 ./scripts/publish-plugin-npm-clawhub.sh
 ```
+
+---
+
+## Claude Code plugin
+
+Forwards each paired WhatsApp user into their own persistent Claude Code CLI session. Each turn spawns `claude -p "<prompt>" --resume <session-id>` with the workspace pinned to `./workspaces/<phone>/`, so the agent has continuous conversational memory *and* a per-user sandboxed filesystem to read/write in.
+
+### Install & pair
+
+From npm (no clone needed):
+
+```bash
+npx claude-whatsapp-official-plugin setup   # pairs WhatsApp, writes .env, starts the bridge
+npx claude-whatsapp-official-plugin start   # subsequent runs
+```
+
+Or from a checkout of this repo:
+
+```bash
+cd claude-plugin
+npm run setup                               # first-run: install deps, pair, write .env, start
+npm start                                   # subsequent runs
+```
+
+**Prerequisites:** Node.js ≥ 22.6 (uses `--experimental-strip-types` to run TypeScript directly), plus a `claude` CLI already logged in on the host — the bridge inherits its auth.
+
+### Features specific to the Claude Code bridge
+
+- **Per-user workspaces** at `./workspaces/<phone>/`, seeded from `workspace-template/`. The agent's file operations stay isolated per WhatsApp user.
+- **Streaming intermediate output** to WhatsApp while Claude is working (toggle with `CLAUDE_STREAM_INTERMEDIATE`).
+- **`send-wa` CLI** inside each workspace — Claude can call `./send-wa "text"` from a skill/hook to push a message back to the paired user (buffer-aware: falls back to the local buffer if the window is closed).
+- **Local buffer** in `WA_BUFFER_DIR` for `window_closed` sends; drains automatically when the backend broadcasts `WINDOW_OPENED` (user tapped the re-engagement template).
+- **Permission modes** via `CLAUDE_PERMISSION_MODE` (`default` / `acceptEdits` / `bypassPermissions` / `plan`). WhatsApp is unattended — if Claude needs a permission prompt and nobody's at the terminal, the turn stalls, so pick consciously.
+
+See [`claude-plugin/README.md`](./claude-plugin/README.md) for the full env reference and turn-by-turn flow diagram.
 
 ---
 
