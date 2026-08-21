@@ -3,7 +3,7 @@ import { extname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { loadConfig, wsUrlFromHttpBase, type Config } from "./config.ts";
-import { fetchMedia, flushPending, LOCAL_WAB, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
+import { chunkText, fetchMedia, flushPending, LOCAL_WAB, MAX_TEXT_CHARS, sendOutboundText, startTypingHeartbeat } from "./transport.ts";
 import { Buffer } from "./buffer.ts";
 import { SessionStore } from "./session-store.ts";
 import {
@@ -110,24 +110,9 @@ async function buildPrompt(
   }
 }
 
-// WhatsApp Cloud API caps text messages at 4096 chars. Chunk on newline
-// boundaries where possible so we don't split mid-sentence.
-function chunkText(text: string, max = 3500): string[] {
-  if (text.length <= max) return [text];
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    const end = Math.min(text.length, start + max);
-    let split = end;
-    if (end < text.length) {
-      const lastNl = text.lastIndexOf("\n", end);
-      if (lastNl > start + max / 2) split = lastNl + 1;
-    }
-    chunks.push(text.slice(start, split).trim());
-    start = split;
-  }
-  return chunks.filter((c) => c.length > 0);
-}
+// chunkText + the 4096-char cap live in transport.ts now — every outbound
+// path goes through sendOutboundText which chunks internally, so callers
+// here can hand it the full text and let it split.
 
 // Token expired mid-turn. Admins get a live login link (self-service re-auth);
 // everyone else gets a vague "temporarily unavailable" notice.
@@ -192,9 +177,8 @@ async function handleInbound(
       if (!bufferedFinalText) return;
       const text = bufferedFinalText;
       bufferedFinalText = null;
-      for (const chunk of chunkText(text)) {
-        await sendOutboundText(cfg, from, chunk, buffer);
-      }
+      // sendOutboundText chunks internally at MAX_TEXT_CHARS.
+      await sendOutboundText(cfg, from, text, buffer);
       // Intermediates get a follow-up typing ping; the final does NOT —
       // its purpose is to terminate the turn.
       if (!asFinal) heartbeat?.ping();
@@ -257,9 +241,8 @@ async function handleInbound(
     console.log(`claude reply session=${reply.sessionId} len=${reply.text.length}`);
     if (heartbeat) await heartbeat.stop();
     if (!reply.text) return;
-    for (const chunk of chunkText(reply.text)) {
-      await sendOutboundText(cfg, from, chunk);
-    }
+    // sendOutboundText chunks internally.
+    await sendOutboundText(cfg, from, reply.text);
   } catch (err) {
     if (heartbeat) await heartbeat.stop();
     if (err instanceof AuthError) {
@@ -314,7 +297,9 @@ async function runOnce(cfg: Config, store: SessionStore, buffer: Buffer): Promis
           if (!phone) return;
           console.log(`window opened for ${phone}; flushing buffer`);
           const r = await flushPending(cfg, buffer, LOCAL_WAB, phone);
-          console.log(`flush delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+          console.log(
+            `flush delivered=${r.delivered} remaining=${r.remaining} dropped=${r.dropped} stopped=${r.stoppedReason ?? "ok"}`,
+          );
           // Buffer was empty — give the user feedback so their tap isn't silently swallowed.
           if (r.delivered === 0 && r.remaining === 0) {
             try {
@@ -332,8 +317,10 @@ async function runOnce(cfg: Config, store: SessionStore, buffer: Buffer): Promis
         const from = String(envelope.payload.from ?? "");
         if (from) {
           const r = await flushPending(cfg, buffer, LOCAL_WAB, from);
-          if (r.delivered > 0) {
-            console.log(`pre-dispatch flush delivered=${r.delivered} remaining=${r.remaining}`);
+          if (r.delivered > 0 || r.dropped > 0) {
+            console.log(
+              `pre-dispatch flush delivered=${r.delivered} remaining=${r.remaining} dropped=${r.dropped}`,
+            );
           }
         }
         await handleInbound(cfg, store, buffer, envelope);
@@ -360,7 +347,9 @@ async function flushAll(cfg: Config, buffer: Buffer): Promise<void> {
   for (const { wab, phone } of pairs) {
     try {
       const r = await flushPending(cfg, buffer, wab, phone);
-      console.log(`startup flush phone=${phone} delivered=${r.delivered} remaining=${r.remaining} stopped=${r.stoppedReason ?? "ok"}`);
+      console.log(
+        `startup flush phone=${phone} delivered=${r.delivered} remaining=${r.remaining} dropped=${r.dropped} stopped=${r.stoppedReason ?? "ok"}`,
+      );
     } catch (err) {
       console.warn(`startup flush failed phone=${phone} err=${String(err)}`);
     }
@@ -377,6 +366,20 @@ async function main(): Promise<void> {
     maxPerPhone: cfg.waBufferMaxPerPhone,
     ttlMs: cfg.waBufferTtlHours * 3600_000,
   });
+
+  // One-shot startup sanitizer: split any oversized text entries persisted
+  // by a prior plugin version (before sendOutboundText chunked internally).
+  // Without this, the very first flush after boot would still hit "text.body
+  // must be at most 4096 chars" and — even with the new skip-and-continue
+  // path — waste attempts before giving up.
+  try {
+    const s = await buffer.sanitizeOversized(MAX_TEXT_CHARS, chunkText);
+    if (s.splitEntries > 0) {
+      console.log(`buffer.sanitized splitEntries=${s.splitEntries} newEntries=${s.newEntries}`);
+    }
+  } catch (err) {
+    console.warn(`buffer sanitize failed: ${String(err)}`);
+  }
 
   // Sweep expired entries periodically. Best-effort; the sweep is idempotent
   // so a missed tick is harmless.

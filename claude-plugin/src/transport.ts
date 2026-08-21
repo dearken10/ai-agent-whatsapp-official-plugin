@@ -13,6 +13,30 @@ type RoutingCfg = Pick<Config, "routingBaseUrl" | "routingApiKey">;
 // from `LOCAL_WAB` regardless.
 export const LOCAL_WAB = "_default";
 
+// WhatsApp Cloud API caps text messages at 4096 chars. We chunk at 3500 to
+// leave headroom for any provider-side prefix/suffix, and prefer breaking on
+// newline boundaries so we don't split mid-sentence. Every outbound path in
+// the plugin funnels through sendOutboundText, so enforcing the cap here
+// guarantees no oversized payload can enter the buffer or reach the provider.
+export const MAX_TEXT_CHARS = 3500;
+
+export function chunkText(text: string, max = MAX_TEXT_CHARS): string[] {
+  if (text.length <= max) return [text];
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(text.length, start + max);
+    let split = end;
+    if (end < text.length) {
+      const lastNl = text.lastIndexOf("\n", end);
+      if (lastNl > start + max / 2) split = lastNl + 1;
+    }
+    chunks.push(text.slice(start, split).trim());
+    start = split;
+  }
+  return chunks.filter((c) => c.length > 0);
+}
+
 export type SendOutboundResult =
   | { status: "delivered"; messageId: string }
   | { status: "queued"; localId: string; templateSent: boolean };
@@ -45,55 +69,100 @@ async function postSend(
   }
 }
 
-// sendOutboundText is buffer-aware. While the buffer for `to` is non-empty
-// it short-circuits and enqueues directly (efficiency throttle: avoids
-// round-trips that we know will be rejected). Otherwise it posts to the
-// backend; on `window_closed` it enqueues the message locally.
+// sendOutboundText is buffer-aware and chunk-aware. Text longer than
+// MAX_TEXT_CHARS is split before anything else so oversized payloads
+// never reach the provider (which rejects with 400 "at most 4096 chars")
+// and — critically — never land in the local buffer as a poison entry
+// that would wedge every subsequent flushPending.
 //
-// Returns the outcome so the caller can log, but never throws on window-closed
-// — the agent treats `queued` as success and moves on.
+// While the buffer for `to` is non-empty it short-circuits and enqueues
+// directly (efficiency throttle: avoids round-trips that we know will
+// be rejected, and preserves ordering vs already-queued messages).
+// Otherwise it posts to the backend; on `window_closed` it enqueues the
+// remaining chunks locally.
+//
+// Returns a single aggregate result — the last delivered chunk's messageId,
+// or the first queued chunk's localId — so callers that only care about
+// "did this turn's reply go out" can treat it opaquely. Never throws on
+// window-closed; the agent treats `queued` as success and moves on.
 export async function sendOutboundText(
   cfg: RoutingCfg,
   to: string,
   text: string,
   buffer?: Buffer,
 ): Promise<SendOutboundResult> {
+  const chunks = chunkText(text);
+  if (chunks.length === 0) {
+    // Empty / whitespace-only — nothing to send. Return a synthetic "delivered"
+    // so callers don't crash; no wire call is made.
+    return { status: "delivered", messageId: "(empty)" };
+  }
+
+  // If the buffer already has pending entries, everything goes into the
+  // buffer so we don't reorder past what's already queued for this phone.
   if (buffer && (await buffer.hasPending(LOCAL_WAB, to))) {
-    const m = await buffer.enqueue({ wab: LOCAL_WAB, phone: to, kind: "text", text });
-    console.log(`buffer.enqueued localId=${m.id} phone=${to} (queue non-empty)`);
-    return { status: "queued", localId: m.id, templateSent: false };
-  }
-  const res = await postSend(cfg, { toPhoneNumber: to, text });
-  if ("status" in res && res.status === "accepted") {
-    return { status: "delivered", messageId: res.messageId };
-  }
-  if ("status" in res && res.status === "window_closed") {
-    const templateSent = res.templateSent === true;
-    if (buffer) {
-      const m = await buffer.enqueue({ wab: LOCAL_WAB, phone: to, kind: "text", text });
-      console.log(`buffer.enqueued localId=${m.id} phone=${to} templateSent=${templateSent}`);
-      return { status: "queued", localId: m.id, templateSent };
+    let firstId: string | null = null;
+    for (const chunk of chunks) {
+      const m = await buffer.enqueue({ wab: LOCAL_WAB, phone: to, kind: "text", text: chunk });
+      if (firstId === null) firstId = m.id;
+      console.log(`buffer.enqueued localId=${m.id} phone=${to} (queue non-empty)`);
     }
-    // No buffer available — surface the window-closed state as a soft "queued"
-    // result so the caller doesn't crash, but the message is effectively lost.
-    console.warn(`window_closed for ${to} but no local buffer configured — message dropped`);
-    return { status: "queued", localId: "(no-buffer)", templateSent };
+    return { status: "queued", localId: firstId ?? "(none)", templateSent: false };
   }
-  throw new Error(`send returned unexpected response: ${JSON.stringify(res)}`);
+
+  let lastMessageId = "";
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const res = await postSend(cfg, { toPhoneNumber: to, text: chunk });
+    if ("status" in res && res.status === "accepted") {
+      lastMessageId = res.messageId;
+      continue;
+    }
+    if ("status" in res && res.status === "window_closed") {
+      const templateSent = res.templateSent === true;
+      // Enqueue THIS chunk and every subsequent one — no point round-tripping
+      // more chunks we know will bounce with the same status.
+      if (buffer) {
+        let firstQueuedId = "";
+        for (let j = i; j < chunks.length; j++) {
+          const m = await buffer.enqueue({ wab: LOCAL_WAB, phone: to, kind: "text", text: chunks[j] });
+          if (!firstQueuedId) firstQueuedId = m.id;
+          console.log(`buffer.enqueued localId=${m.id} phone=${to} templateSent=${templateSent}`);
+        }
+        return { status: "queued", localId: firstQueuedId, templateSent };
+      }
+      // No buffer available — the remaining chunks are lost. Surface a soft
+      // "queued" so the caller doesn't crash.
+      console.warn(`window_closed for ${to} but no local buffer configured — ${chunks.length - i} chunk(s) dropped`);
+      return { status: "queued", localId: "(no-buffer)", templateSent };
+    }
+    throw new Error(`send returned unexpected response: ${JSON.stringify(res)}`);
+  }
+  return { status: "delivered", messageId: lastMessageId };
 }
 
+// Maximum attempts before a buffer entry is dropped as poison. Prior
+// behaviour halted the entire queue on any single failure, so one
+// malformed/oversized entry (e.g. text > 4096 chars) wedged everything
+// behind it. We now skip past individual hard failures and give up on an
+// item once it has failed this many times.
+export const MAX_FLUSH_ATTEMPTS = 3;
+
 // flushPending drains every entry in the buffer for (wab, phone) by re-posting
-// them in order. Each successful send removes the entry; a window_closed
-// response or transient error pauses the flush so the remaining entries
-// stay queued for the next inbound trigger.
+// them in order. Each successful send removes the entry. A `window_closed`
+// response halts the whole flush (no point trying more — the same window
+// gate will reject the rest). A hard error on a single entry is recorded
+// against that entry only: the loop continues past it, and once an entry
+// reaches MAX_FLUSH_ATTEMPTS it is dropped so it can't wedge the queue.
 export async function flushPending(
   cfg: RoutingCfg,
   buffer: Buffer,
   wab: string,
   phone: string,
-): Promise<{ delivered: number; remaining: number; stoppedReason?: string }> {
+): Promise<{ delivered: number; remaining: number; dropped: number; stoppedReason?: string }> {
   const pending = await buffer.listPending(wab, phone);
   let delivered = 0;
+  let dropped = 0;
   for (const m of pending) {
     try {
       const res = await postSend(cfg, sendBodyFromBuffered(m));
@@ -104,16 +173,31 @@ export async function flushPending(
         continue;
       }
       if ("status" in res && res.status === "window_closed") {
-        return { delivered, remaining: pending.length - delivered, stoppedReason: "window_closed" };
+        const remaining = pending.length - delivered - dropped;
+        return { delivered, remaining, dropped, stoppedReason: "window_closed" };
       }
       throw new Error(`unexpected flush response: ${JSON.stringify(res)}`);
     } catch (err) {
+      const attempts = m.attempts + 1;
+      if (attempts >= MAX_FLUSH_ATTEMPTS) {
+        // Poison: give up on this entry so it can't hold up the rest.
+        await buffer.markDelivered(wab, phone, m.id);
+        dropped += 1;
+        console.warn(
+          `buffer.dropped localId=${m.id} phone=${phone} attempts=${attempts} err=${String(err)}`,
+        );
+        continue;
+      }
       await buffer.recordFailure(wab, phone, m.id, String(err));
-      console.warn(`buffer.flush_failed localId=${m.id} phone=${phone} err=${String(err)}`);
-      return { delivered, remaining: pending.length - delivered, stoppedReason: "error" };
+      console.warn(
+        `buffer.flush_failed localId=${m.id} phone=${phone} attempts=${attempts} err=${String(err)}`,
+      );
+      // Skip this entry for now (it stays in the queue with bumped attempts)
+      // and try the next one — a single bad entry must not block the rest.
+      continue;
     }
   }
-  return { delivered, remaining: 0 };
+  return { delivered, remaining: pending.length - delivered - dropped, dropped };
 }
 
 function sendBodyFromBuffered(m: BufferedMessage): {
