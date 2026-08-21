@@ -261,6 +261,59 @@ export class Buffer {
     }));
   }
 
+  // sanitizeOversized rewrites any text entry whose body exceeds `maxTextChars`
+  // as N smaller entries produced by `chunker`, preserving order. Runs at
+  // startup so buffers persisted by older plugin versions (which allowed
+  // oversized bodies to accumulate — see docs/prd/24h-window-and-buffering.md)
+  // self-heal on the next boot instead of poisoning every subsequent flush.
+  // Returns { splitEntries, newEntries } for observability. Best-effort per
+  // (wab, phone); a failure on one file does not abort the sweep.
+  async sanitizeOversized(
+    maxTextChars: number,
+    chunker: (text: string, max: number) => string[],
+  ): Promise<{ splitEntries: number; newEntries: number }> {
+    let splitEntries = 0;
+    let newEntries = 0;
+    for (const { wab, phone } of await this.enumeratePending()) {
+      const file = fileFor(this.cfg, wab, phone);
+      await runSerial(wab, phone, () => withFileLock(file, async () => {
+        const msgs = await readAll(file);
+        const rewritten: BufferedMessage[] = [];
+        let changed = false;
+        for (const m of msgs) {
+          if (m.kind !== "text" || !m.text || m.text.length <= maxTextChars) {
+            rewritten.push(m);
+            continue;
+          }
+          const parts = chunker(m.text, maxTextChars);
+          if (parts.length <= 1) {
+            rewritten.push(m);
+            continue;
+          }
+          // Preserve the original enqueuedAt so ordering vs surrounding
+          // entries is stable. Mint fresh ids so the split chunks can be
+          // individually delivered / failed / dropped.
+          for (const p of parts) {
+            rewritten.push({
+              ...m,
+              id: randomUUID(),
+              text: p,
+              attempts: 0,
+              lastError: undefined,
+            });
+          }
+          splitEntries += 1;
+          newEntries += parts.length;
+          changed = true;
+        }
+        if (changed) {
+          await writeAll(file, rewritten);
+        }
+      }));
+    }
+    return { splitEntries, newEntries };
+  }
+
   // sweepExpired removes entries older than cfg.ttlMs across all phones.
   // Returns the number removed. Best-effort; partial failures are logged.
   async sweepExpired(now: Date = new Date()): Promise<number> {
